@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gridlytics — Energy Intelligence</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+  <!-- App styles -->
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════ HEADER -->
+<header class="header">
+  <div class="header-left">
+    <span class="logo">⚡</span>
+    <span class="logo-text">Gridlytics <span class="logo-accent">AI</span></span>
+    <span class="logo-sub">Energy P&L Intelligence · India</span>
+  </div>
+
+  <div class="header-center">
+    <div class="map-view-toggle" id="map-view-toggle">
+      <button class="toggle-btn" data-view="tampering">⚡ Tampering</button>
+      <button class="toggle-btn" data-view="htls">🔌 Wire Loss</button>
+      <button class="toggle-btn active" data-view="sm">📟 Smart Meter</button>
+    </div>
+  </div>
+
+  <div class="header-right">
+    <a class="streamlit-link" href="/streamlit" target="_blank" title="Open Streamlit dashboard">
+      🐍 Streamlit
+    </a>
+    <span class="data-badge" id="data-badge">
+      <span class="pulse"></span> Live Data
+    </span>
+    <button class="refresh-btn" id="refresh-btn" title="Refresh all data">↺</button>
+    <span class="timestamp" id="last-updated">–</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════════════ ML PERFORMANCE STRIP -->
+<div class="ml-perf-strip" id="ml-perf-strip" style="display:none">
+  <div class="ml-perf-label">🧠 AutoTune</div>
+  <div class="ml-perf-cards" id="ml-perf-cards"></div>
+  <div class="ml-perf-hint">Hyperopt Bayesian search · MLflow tracked</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ MAIN GRID -->
+<div class="main-grid">
+
+  <!-- ══════════════ LEFT: MAP PANEL ══════════════ -->
+  <aside class="map-panel">
+    <div id="india-map"></div>
+
+    <!-- Map legend overlay -->
+    <div class="map-legend" id="map-legend">
+      <div class="legend-title" id="legend-title">Tampering Index</div>
+      <div class="legend-scale" id="legend-scale">
+        <div class="legend-row"><span class="dot" style="background:#7f1d1d"></span><span>Critical (65–100)</span></div>
+        <div class="legend-row"><span class="dot" style="background:#f97316"></span><span>High (40–65)</span></div>
+        <div class="legend-row"><span class="dot" style="background:#f59e0b"></span><span>Moderate (20–40)</span></div>
+        <div class="legend-row"><span class="dot" style="background:#10b981"></span><span>Low (0–20)</span></div>
+      </div>
+    </div>
+
+    <!-- Map loading overlay -->
+    <div class="map-loading" id="map-loading">
+      <div class="spinner"></div>
+      <span>Fetching grid data…</span>
+    </div>
+  </aside>
+
+  <!-- ══════════════ RIGHT: DASHBOARD ══════════════ -->
+  <main class="dashboard" id="dashboard">
+
+    <!-- KPI STRIP -->
+    <section class="kpi-strip">
+      <div class="kpi-card kpi-red">
+        <div class="kpi-label">Est. Annual Theft</div>
+        <div class="kpi-value" id="kpi-theft">–</div>
+        <div class="kpi-sub">commercial AT&C loss</div>
+      </div>
+      <div class="kpi-card kpi-blue">
+        <div class="kpi-label">HTLS Wire Saving</div>
+        <div class="kpi-value" id="kpi-htls">–</div>
+        <div class="kpi-sub">₹Cr/yr if upgraded</div>
+      </div>
+      <div class="kpi-card kpi-green">
+        <div class="kpi-label">Smart Meters Pending</div>
+        <div class="kpi-value" id="kpi-sm">–</div>
+        <div class="kpi-sub">across 21 states (RDSS)</div>
+      </div>
+      <div class="kpi-card kpi-amber">
+        <div class="kpi-label">Today's IEX Signal</div>
+        <div class="kpi-value" id="kpi-signal">–</div>
+        <div class="kpi-sub" id="kpi-spread">–</div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════ VIEW: TAMPERING (default) ═══════════════════ -->
+    <div id="view-tampering" class="view-dashboard">
+
+      <!-- ROW 1: Revenue Leakage by State (full width) -->
+      <section class="panel panel-full">
+        <div class="panel-header">
+          <span class="panel-title">💸 Commercial Revenue Leakage by State</span>
+          <span class="panel-sub">Estimated annual theft + billing &amp; collection gaps · top 14 states</span>
+        </div>
+        <div class="chart-wrap" style="height:200px"><canvas id="chart-theft-revenue"></canvas></div>
+      </section>
+
+      <!-- ROW 2: Tampering Severity | AT&C Improvement 2021→2024 -->
+      <section class="panel-row">
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">🚨 Tampering Risk Distribution</span>
+            <span class="panel-sub">ML-scored severity across 46 DISCOMs</span>
+          </div>
+          <div class="chart-wrap" style="height:260px"><canvas id="chart-theft-severity"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">📉 AT&amp;C Loss Trend 2021→2024</span>
+            <span class="panel-sub">3-year reduction via RDSS enforcement · top improved states</span>
+          </div>
+          <div class="chart-wrap" style="height:260px"><canvas id="chart-theft-atc-trend"></canvas></div>
+        </div>
+      </section>
+
+      <!-- ROW 3: ML Anomaly Detection + Summary KPIs -->
+      <section class="panel panel-full">
+        <div class="panel-header">
+          <span class="panel-title">🤖 ML Anomaly Detection — Flagged DISCOMs</span>
+          <span class="panel-sub">IsolationForest · unusual AT&amp;C / billing patterns · anomalous = likely manipulation</span>
+        </div>
+        <div id="theft-summary-strip" class="view-kpi-strip"></div>
+        <div class="chart-wrap" style="height:150px"><canvas id="chart-theft-anomaly"></canvas></div>
+      </section>
+
+      <!-- ROW 4: MLflow Model Registry -->
+      <section class="panel panel-full">
+        <div class="panel-header">
+          <span class="panel-title">🧪 MLflow Model Registry</span>
+          <span class="panel-sub">Tracked experiments · anomaly detection + price forecasting</span>
+        </div>
+        <div id="model-table" class="model-table"></div>
+        <div class="hindi-card" id="hindi-card" style="display:none">
+          <div class="hindi-en" id="hindi-en"></div>
+          <div class="hindi-hi" id="hindi-hi"></div>
+        </div>
+      </section>
+
+    </div><!-- /view-tampering -->
+
+    <!-- ═══════════════════ VIEW: WIRE LOSS / HTLS ═══════════════════ -->
+    <div id="view-htls" class="view-dashboard" style="display:none">
+
+      <!-- ROW 1: Capex vs Annual Saving (full width) -->
+      <section class="panel panel-full">
+        <div class="panel-header">
+          <span class="panel-title">🔵 HTLS Upgrade — Capex vs Annual Saving (Top 15 DISCOMs)</span>
+          <span class="panel-sub">High-Temp Low-Sag conductors cut tech loss 8.5% → 4.5% (4 ppt)</span>
+        </div>
+        <div class="chart-wrap" style="height:220px"><canvas id="chart-htls-capex"></canvas></div>
+      </section>
+
+      <!-- ROW 2: Tech Loss Distribution | Payback Scatter -->
+      <section class="panel-row">
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">⚡ Tech Loss vs CEA Benchmark</span>
+            <span class="panel-sub">8.5% = national best practice · gap = upgrade opportunity</span>
+          </div>
+          <div class="chart-wrap" style="height:260px"><canvas id="chart-htls-loss"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">📉 Investment vs Saving Scatter</span>
+            <span class="panel-sub">Bubble size = payback years · lower-right = best ROI</span>
+          </div>
+          <div class="chart-wrap" style="height:260px"><canvas id="chart-htls-scatter"></canvas></div>
+        </div>
+      </section>
+
+      <!-- ROW 3: Payback Waterfall / Summary KPIs -->
+      <section class="panel panel-full">
+        <div class="panel-header">
+          <span class="panel-title">💰 India-wide HTLS Transition Economics</span>
+          <span class="panel-sub">Aggregate across all 46 DISCOMs</span>
+        </div>
+        <div id="htls-summary-strip" class="view-kpi-strip"></div>
+        <div class="chart-wrap" style="height:150px"><canvas id="chart-htls-payback"></canvas></div>
+      </section>
+
+    </div><!-- /view-htls -->
+
+    <!-- ═══════════════════ VIEW: SMART METER ═══════════════════ -->
+    <div id="view-sm" class="view-dashboard" style="display:none">
+
+      <!-- ROW 0: IEX Price Signals + 7-day Forecast — Why Smart Meters Matter -->
+      <section class="panel-row">
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">⚡ IEX Price vs Flat Tariff (30 days)</span>
+            <span class="panel-sub">Off-peak IEX &lt; flat tariff = load-shift saving · enabled by smart meters</span>
+          </div>
+          <div class="chart-wrap" style="height:190px"><canvas id="chart-sm-iex"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">🔮 7-day IEX Price Forecast</span>
+            <span class="panel-sub">GBT model · plan ToU load-shift slots in advance</span>
+          </div>
+          <div class="chart-wrap" style="height:190px"><canvas id="chart-sm-forecast"></canvas></div>
+        </div>
+      </section>
+
+      <!-- ROW 1: Deployment Progress by State -->
+      <section class="panel panel-full">
+        <div class="panel-header">
+          <span class="panel-title">📟 Smart Meter Deployment Progress by State</span>
+          <span class="panel-sub">RDSS scheme · installed vs remaining · Mar 2026 snapshot</span>
+        </div>
+        <div class="chart-wrap" style="height:220px"><canvas id="chart-sm-progress"></canvas></div>
+      </section>
+
+      <!-- ROW 2: ToU Saving by State | Investment vs Saving Scatter -->
+      <section class="panel-row">
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">💵 Annual ToU Saving Potential by State</span>
+            <span class="panel-sub">₹Cr/yr from shifting 6% load to off-peak IEX slots</span>
+          </div>
+          <div class="chart-wrap" style="height:260px"><canvas id="chart-sm-saving"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">🔄 Capex vs Annual ToU Saving</span>
+            <span class="panel-sub">Bubble size = meters remaining · target: lower-right</span>
+          </div>
+          <div class="chart-wrap" style="height:260px"><canvas id="chart-sm-scatter"></canvas></div>
+        </div>
+      </section>
+
+      <!-- ROW 3: SM Summary KPIs -->
+      <section class="panel panel-full">
+        <div class="panel-header">
+          <span class="panel-title">📊 India-wide Smart Meter Economics</span>
+          <span class="panel-sub">Aggregate across all states in RDSS scheme</span>
+        </div>
+        <div id="sm-summary-strip" class="view-kpi-strip"></div>
+        <div class="chart-wrap" style="height:150px"><canvas id="chart-sm-payback"></canvas></div>
+      </section>
+
+    </div><!-- /view-sm -->
+
+    <!-- ROW 5: Top DISCOM Opportunities (full width) -->
+    <section class="panel panel-full">
+      <div class="panel-header">
+        <span class="panel-title" id="discom-table-title">🏆 Top DISCOM Opportunities — Overall Score</span>
+        <span class="panel-sub" id="discom-table-sub">Composite: 40% tampering + 30% HTLS + 30% smart meter</span>
+      </div>
+      <div id="discom-table" class="discom-table"></div>
+    </section>
+
+  </main><!-- /dashboard -->
+</div><!-- /main-grid -->
+
+<!-- Blur overlay (behind drawer, over the 10% map strip) -->
+<div class="discom-overlay" id="discom-overlay"></div>
+
+<!-- ═══════════════════════════════════════════ DISCOM DETAIL DRAWER -->
+<div class="discom-drawer" id="discom-drawer">
+
+  <!-- Header -->
+  <div class="dd-header">
+    <button class="dd-back" id="dd-back" title="Back to map">← Map</button>
+    <div class="dd-header-center">
+      <div class="dd-name" id="dd-name">–</div>
+      <div class="dd-state" id="dd-state">–</div>
+    </div>
+    <span class="dd-risk-badge" id="dd-risk-badge">–</span>
+  </div>
+
+  <!-- Scrollable body -->
+  <div class="dd-body">
+
+    <!-- KPI strip -->
+    <div class="dd-kpi-strip">
+      <div class="dd-kpi">
+        <div class="dd-kpi-val" id="dd-score-val">–</div>
+        <div class="dd-kpi-label">Opportunity</div>
+        <div class="dd-score-track"><div class="dd-score-fill" id="dd-score-fill"></div></div>
+      </div>
+      <div class="dd-kpi">
+        <div class="dd-kpi-val" id="ddk-atc-val" style="color:#ef4444">–</div>
+        <div class="dd-kpi-label">AT&amp;C Loss</div>
+      </div>
+      <div class="dd-kpi">
+        <div class="dd-kpi-val" id="ddk-theft-val" style="color:#f97316">–</div>
+        <div class="dd-kpi-label">Theft/yr</div>
+      </div>
+      <div class="dd-kpi">
+        <div class="dd-kpi-val" id="ddk-htls-val" style="color:#3b82f6">–</div>
+        <div class="dd-kpi-label">HTLS Saving</div>
+      </div>
+      <div class="dd-kpi">
+        <div class="dd-kpi-val" id="ddk-sm-val" style="color:#10b981">–</div>
+        <div class="dd-kpi-label">SM Done</div>
+      </div>
+    </div>
+
+    <!-- ── VIZ ROW 1: Radar + Waterfall + Slider ── -->
+    <div class="dd-viz-row">
+
+      <!-- A: Radar Gap Chart -->
+      <div class="dd-viz-card">
+        <div class="dd-viz-title">📡 Performance vs Benchmarks</div>
+        <div class="dd-chart-area"><canvas id="dd-radar"></canvas></div>
+        <div class="dd-radar-legend">
+          <span><span style="color:#ef4444">●</span> This DISCOM</span>
+          <span><span style="color:#f59e0b">●</span> State Avg</span>
+          <span><span style="color:#10b981">●</span> Best-in-Class</span>
+        </div>
+      </div>
+
+      <!-- B: Revenue Waterfall -->
+      <div class="dd-viz-card">
+        <div class="dd-viz-title">💰 Revenue Recovery Waterfall</div>
+        <div class="dd-chart-area"><canvas id="dd-waterfall"></canvas></div>
+        <div class="dd-viz-sub" id="dd-waterfall-total">–</div>
+      </div>
+
+      <!-- D: Investment ROI Simulator -->
+      <div class="dd-viz-card dd-slider-card">
+        <div class="dd-viz-title">🔧 Investment ROI Simulator</div>
+        <div class="dd-slider-inv-row">
+          <span class="dd-slider-inv-label">Invest</span>
+          <strong class="dd-slider-inv-val" id="dd-inv-display">₹100 Cr</strong>
+        </div>
+        <input type="range" id="dd-inv-slider" class="dd-inv-range" min="0" max="2000" step="25" value="100" />
+        <div class="dd-alloc-bar">
+          <div class="dd-alloc-htls" id="dd-alloc-htls">HTLS</div>
+          <div class="dd-alloc-sm"   id="dd-alloc-sm">SM</div>
+        </div>
+        <div class="dd-roi-grid">
+          <div class="dd-roi-item">
+            <div class="dd-roi-val" id="dd-roi-annual" style="color:#10b981">–</div>
+            <div class="dd-roi-label">Annual Saving</div>
+          </div>
+          <div class="dd-roi-item">
+            <div class="dd-roi-val" id="dd-roi-pct" style="color:#3b82f6">–</div>
+            <div class="dd-roi-label">ROI</div>
+          </div>
+          <div class="dd-roi-item">
+            <div class="dd-roi-val" id="dd-roi-payback" style="color:#f59e0b">–</div>
+            <div class="dd-roi-label">Payback</div>
+          </div>
+          <div class="dd-roi-item">
+            <div class="dd-roi-val" id="dd-roi-atc" style="color:#ef4444">–</div>
+            <div class="dd-roi-label">AT&amp;C −pp</div>
+          </div>
+        </div>
+        <div style="height:70px;margin-top:8px"><canvas id="dd-roi-curve"></canvas></div>
+      </div>
+    </div>
+
+    <!-- ── VIZ ROW 2: Bubble Priority Matrix (full width) ── -->
+    <div class="dd-viz-card dd-bubble-card">
+      <div class="dd-viz-title">🎯 Priority Matrix — Impact vs Timeline
+        <span class="dd-viz-subtitle">Bubble size = confidence</span>
+      </div>
+      <div style="height:200px;position:relative">
+        <canvas id="dd-bubble"></canvas>
+        <div id="dd-bubble-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#8899aa;font-size:12px">Loading matrix…</div>
+      </div>
+    </div>
+
+    <!-- ── AI Recommendations ── -->
+    <div class="dd-advisor-section">
+      <div class="dd-advisor-head">
+        <div class="dd-advisor-title-row">
+          <span class="dd-advisor-title">🤖 AI-Powered Recommendations</span>
+          <span class="dd-benchmark-badge" id="dd-benchmark-badge" style="display:none">📡 Live data</span>
+        </div>
+        <div class="dd-lang-row">
+          <button class="dd-lang active" data-lang="en">EN</button>
+          <button class="dd-lang" data-lang="hi">हि</button>
+          <button class="dd-lang" data-lang="bn">বাং</button>
+          <button class="dd-lang" data-lang="ta">தமி</button>
+          <button class="dd-lang" data-lang="te">తె</button>
+          <button class="dd-lang" data-lang="mr">म</button>
+        </div>
+      </div>
+      <div class="dd-cards" id="dd-cards">
+        <div class="dd-thinking-wrap" style="grid-column:1/-1">
+          <div class="dd-thinking"><span></span><span></span><span></span></div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /dd-body -->
+</div><!-- /discom-drawer -->
+
+<!-- ═══════════════════════════════════════════════════════════ GENIE CHAT -->
+<div class="genie-fab" id="genie-fab" title="Ask Gridlytics">
+  <span class="genie-fab-icon">🤖</span>
+  <span class="genie-fab-label">Ask AI</span>
+</div>
+
+<div class="genie-panel" id="genie-panel">
+  <div class="genie-header">
+    <span class="genie-title">⚡ Gridlytics <span style="color:#f59e0b">Genie</span></span>
+    <span class="genie-subtitle">Natural language · powered by Databricks</span>
+    <button class="genie-close" id="genie-close">✕</button>
+  </div>
+  <div class="genie-messages" id="genie-messages">
+    <div class="genie-welcome">
+      <div class="genie-bot-msg">
+        Hi! I'm Gridlytics Genie. Ask me anything about India's energy grid — AT&amp;C losses, IEX prices, battery arbitrage, DISCOM theft patterns, or price forecasts.
+      </div>
+      <div class="genie-chips">
+        <button class="genie-chip" data-q="Which DISCOMs have the highest tampering index?">⚡ Top tampering DISCOMs</button>
+        <button class="genie-chip" data-q="What is the total estimated theft revenue loss across all states?">💰 Total theft losses</button>
+        <button class="genie-chip" data-q="Show best arbitrage opportunities in the last 30 days">📈 Best arbitrage days</button>
+        <button class="genie-chip" data-q="Which states have the worst AT&C losses?">🗺️ Worst AT&C states</button>
+        <button class="genie-chip" data-q="What does the IEX price forecast look like for the next 7 days?">🔮 Price forecast</button>
+      </div>
+    </div>
+  </div>
+  <div class="genie-input-row">
+    <input type="text" id="genie-input" placeholder="Ask about energy data…" autocomplete="off" />
+    <button id="genie-send">Send</button>
+  </div>
+</div>
+
+<!-- Loading overlay (initial) -->
+<div class="page-loader" id="page-loader">
+  <div class="loader-inner">
+    <div class="loader-logo">⚡</div>
+    <div class="loader-text">Gridlytics <span style="color:#f59e0b">AI</span></div>
+    <div class="loader-sub">Energy P&L Intelligence · India</div>
+    <div class="loader-bar"><div class="loader-fill" id="loader-fill"></div></div>
+    <div class="loader-status" id="loader-status">Initialising…</div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
