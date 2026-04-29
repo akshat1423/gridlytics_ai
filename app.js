@@ -2052,7 +2052,7 @@ window.addEventListener('DOMContentLoaded', boot);
   if (!strip || !cards) return;
 
   try {
-    const data = await apiFetch('/api/model-performance');
+    const data = await apiFetch('/api/models');
     if (!data || !data.length) return;
 
     cards.innerHTML = data.map(m => {

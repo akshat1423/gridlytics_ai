@@ -2,7 +2,8 @@
   "cleanUrls": false,
   "trailingSlash": false,
   "rewrites": [
-    { "source": "/api/refresh", "destination": "/api/debug" }
+    { "source": "/api/refresh", "destination": "/api/debug" },
+    { "source": "/api/model-performance", "destination": "/api/models" }
   ],
   "headers": [
     {
