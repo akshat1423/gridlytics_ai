@@ -13,7 +13,7 @@ Gridlytics turns smart-meter data into actionable, explainable, decision-support
 
 ### Local Mode (BESCOM, Bengaluru) — primary view
 
-A tactical, full-bleed satellite dashboard styled after Delhi Kavach, with four sub-views:
+A tactical, full-bleed 3D satellite dashboard with four sub-views:
 
 1. **Meter Anomalies** — 576 synthetic 15-min smart meters across 12 BESCOM zones. Severity-scaled circle markers (Critical/High/Moderate/Low), real Bengaluru zone polygons, hover/click drives a floating right detail panel with a 24h consumption chart, SHAP attribution, causal reasoning chain, and an LLM-generated inspector brief.
 2. **Zone Forecast** — 24h hourly demand prediction per zone with confidence bands, peak-load risk ranking, driver attribution (temperature / weekday / AC penetration / festival), and a sortable zone risk table.
