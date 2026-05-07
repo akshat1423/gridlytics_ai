@@ -53,6 +53,8 @@ Chart.defaults.animation        = false;
 
 const charts = {};
 let map, markerLayer, stateLayer;
+let mlMap = null;        // MapLibre GL satellite map (Local mode)
+let mlPopup = null;
 const INDIA_GEOJSON = 'https://raw.githubusercontent.com/geohacker/india/master/state/india_state.geojson';
 
 // ─── API helpers ─────────────────────────────────────────────────────────────
@@ -354,6 +356,300 @@ async function initMap() {
   renderMapMarkers();
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+//   MapLibre GL — 3D tilted satellite view for Local mode (Delhi-Kavach style)
+// ═══════════════════════════════════════════════════════════════════════
+function initMapLibre() {
+  if (mlMap) return mlMap;
+  if (!window.maplibregl) return null;
+
+  mlMap = new maplibregl.Map({
+    container: 'bengaluru-map',
+    style: {
+      version: 8,
+      glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf',
+      sources: {
+        'esri-imagery': {
+          type: 'raster',
+          tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+          tileSize: 256,
+          maxzoom: 19,
+          attribution: 'Imagery © Esri, Maxar',
+        },
+        'esri-labels': {
+          type: 'raster',
+          tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'],
+          tileSize: 256,
+          maxzoom: 19,
+        },
+      },
+      layers: [
+        { id: 'imagery', type: 'raster', source: 'esri-imagery' },
+        { id: 'labels',  type: 'raster', source: 'esri-labels', paint: { 'raster-opacity': 0.55 } },
+      ],
+    },
+    center: [BENGALURU_CENTER[1], BENGALURU_CENTER[0]],   // [lon, lat]
+    zoom: 11,
+    pitch: 55,                  // 3D tilt — the key Delhi-Kavach look
+    bearing: -12,
+    antialias: true,
+    attributionControl: { compact: true },
+  });
+
+  mlMap.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
+
+  mlPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, className: 'ml-popup' });
+
+  mlMap.on('load', () => {
+    addMapLibreLayers();
+    if (STATE.dashboardMode === 'local') refreshMapLibreData();
+  });
+
+  return mlMap;
+}
+
+// Empty source/layer scaffolding — populated on data refresh
+function addMapLibreLayers() {
+  if (!mlMap) return;
+
+  // Zone polygons
+  mlMap.addSource('zone-bounds', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  mlMap.addLayer({
+    id: 'zone-bounds-fill',
+    type: 'fill',
+    source: 'zone-bounds',
+    paint: {
+      'fill-color': [
+        'match', ['get', 'risk_level'],
+        'Critical', '#ef4444',
+        'High',     '#f97316',
+        'Moderate', '#f59e0b',
+        '#10b981',
+      ],
+      'fill-opacity': ['case', ['boolean', ['feature-state', 'active'], false], 0.20, 0.06],
+    },
+  });
+  mlMap.addLayer({
+    id: 'zone-bounds-line',
+    type: 'line',
+    source: 'zone-bounds',
+    paint: {
+      'line-color': [
+        'match', ['get', 'risk_level'],
+        'Critical', '#ef4444',
+        'High',     '#f97316',
+        'Moderate', '#f59e0b',
+        '#10b981',
+      ],
+      'line-width': ['case', ['boolean', ['feature-state', 'active'], false], 2.5, 1.2],
+      'line-opacity': 0.85,
+      'line-dasharray': [3, 3],
+    },
+  });
+  mlMap.addLayer({
+    id: 'zone-bounds-label',
+    type: 'symbol',
+    source: 'zone-bounds',
+    layout: {
+      'text-field': ['get', 'zone_name'],
+      'text-size': 11,
+      'text-letter-spacing': 0.08,
+      'text-transform': 'uppercase',
+      'text-offset': [0, 0],
+      'text-allow-overlap': false,
+    },
+    paint: {
+      'text-color': '#7dd3fc',
+      'text-halo-color': '#0e1623',
+      'text-halo-width': 1.2,
+      'text-opacity': 0.9,
+    },
+  });
+
+  // Meter dots
+  mlMap.addSource('meters', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  mlMap.addLayer({
+    id: 'meters-circle',
+    type: 'circle',
+    source: 'meters',
+    paint: {
+      'circle-radius': ['case', ['get', 'is_theft'], 5.5, 2.4],
+      'circle-color': [
+        'match', ['get', 'severity'],
+        'Critical', '#ef4444',
+        'High',     '#f97316',
+        'Moderate', '#f59e0b',
+        '#10b981',
+      ],
+      'circle-opacity': ['case', ['get', 'is_theft'], 0.92, 0.55],
+      'circle-stroke-color': '#0e1623',
+      'circle-stroke-width': ['case', ['get', 'is_theft'], 1.4, 0],
+    },
+  });
+
+  // Zone bubbles (used in zone-density mode)
+  mlMap.addSource('zone-bubbles', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  mlMap.addLayer({
+    id: 'zone-bubbles-circle',
+    type: 'circle',
+    source: 'zone-bubbles',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['get', 'flagged_ratio'], 0, 14, 1, 36],
+      'circle-color': [
+        'match', ['get', 'risk_level'],
+        'Critical', '#ef4444',
+        'High',     '#f97316',
+        'Moderate', '#f59e0b',
+        '#10b981',
+      ],
+      'circle-opacity': 0.35,
+      'circle-stroke-color': [
+        'match', ['get', 'risk_level'],
+        'Critical', '#ef4444',
+        'High',     '#f97316',
+        'Moderate', '#f59e0b',
+        '#10b981',
+      ],
+      'circle-stroke-width': 2,
+    },
+  });
+
+  // Hover handlers
+  mlMap.on('mousemove', 'meters-circle', (e) => {
+    if (!e.features.length || STATE.pinnedMeter) return;
+    const id = e.features[0].properties.meter_id;
+    const m = findMeterById(id);
+    if (m) {
+      updateDetailPanelForMeter(m, false);
+      mlMap.getCanvas().style.cursor = 'pointer';
+    }
+  });
+  mlMap.on('mouseleave', 'meters-circle', () => { mlMap.getCanvas().style.cursor = ''; });
+  mlMap.on('click', 'meters-circle', (e) => {
+    if (!e.features.length) return;
+    const id = e.features[0].properties.meter_id;
+    STATE.pinnedMeter = id;
+    const m = findMeterById(id);
+    if (m) updateDetailPanelForMeter(m, true);
+  });
+
+  // Zone polygon click → drill-in
+  mlMap.on('click', 'zone-bounds-fill', (e) => {
+    if (!e.features.length) return;
+    const zid = e.features[0].properties.zone_id;
+    const zone = (STATE.data.zoneForecast || []).find(z => z.zone_id === zid);
+    if (!zone) return;
+
+    if (STATE.localView === 'meters') {
+      STATE.selectedZone = zid;
+      STATE.density = 'meter';
+      document.querySelectorAll('.density-btn').forEach(b => b.classList.toggle('active', b.dataset.density === 'meter'));
+      const dEl = document.getElementById('bm-density'); if (dEl) dEl.textContent = 'METER';
+      const dSub = document.getElementById('bm-density-sub'); if (dSub) dSub.textContent = `drilled into ${zone.zone_name}`;
+      const metaView = document.getElementById('meta-view'); if (metaView) metaView.textContent = 'METER · ' + zone.zone_name.toUpperCase();
+      const metaZ = document.getElementById('meta-zone'); if (metaZ) metaZ.textContent = zone.zone_name.toUpperCase();
+      // Fit camera to the zone polygon
+      const coords = e.features[0].geometry.coordinates[0];
+      const lons = coords.map(c => c[0]);
+      const lats = coords.map(c => c[1]);
+      mlMap.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]], { padding: 60, pitch: 55, bearing: -12, maxZoom: 14, duration: 700 });
+      updateBackButton();
+      refreshMapLibreData();
+    }
+    updateDetailPanelForZone(zone, true);
+  });
+  mlMap.on('mouseenter', 'zone-bounds-fill', (e) => {
+    mlMap.getCanvas().style.cursor = 'pointer';
+    if (e.features.length) {
+      const zid = e.features[0].properties.zone_id;
+      const zone = (STATE.data.zoneForecast || []).find(z => z.zone_id === zid);
+      if (zone && !STATE.pinnedMeter) updateDetailPanelForZone(zone, false);
+    }
+  });
+  mlMap.on('mouseleave', 'zone-bounds-fill', () => { mlMap.getCanvas().style.cursor = ''; });
+}
+
+// Sync meter / zone data into MapLibre sources (call whenever data or filter state changes)
+function refreshMapLibreData() {
+  if (!mlMap || !mlMap.isStyleLoaded()) {
+    if (mlMap) mlMap.once('load', refreshMapLibreData);
+    return;
+  }
+
+  // Zone boundaries with risk_level prop (lookup per zone)
+  const zonesById = {};
+  (STATE.data.zoneForecast || []).forEach(z => { zonesById[z.zone_id] = z; });
+  const fc = STATE.data.zoneBounds;
+  let zoneBoundsFC = { type: 'FeatureCollection', features: [] };
+  if (fc && fc.features) {
+    zoneBoundsFC = {
+      type: 'FeatureCollection',
+      features: fc.features.map(f => {
+        const z = zonesById[f.properties.zone_id];
+        return {
+          ...f,
+          properties: {
+            ...f.properties,
+            risk_level: z ? z.risk_level : 'Low',
+          },
+        };
+      }),
+    };
+  }
+  mlMap.getSource('zone-bounds').setData(zoneBoundsFC);
+
+  // Meters (filtered by layer toggles + zone drill-down)
+  const allMeters = STATE.data.meters || [];
+  const meters = allMeters.filter(m => {
+    if (STATE.selectedZone && m.zone_id !== STATE.selectedZone) return false;
+    if (m.severity === 'Critical' && !STATE.layerOn.critical) return false;
+    if (m.severity === 'High'     && !STATE.layerOn.high)     return false;
+    if (m.severity === 'Moderate' && !STATE.layerOn.moderate) return false;
+    if (m.severity === 'Low'      && !STATE.layerOn.normal)   return false;
+    return true;
+  });
+  const meterFC = {
+    type: 'FeatureCollection',
+    features: meters.map(m => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [m.lon, m.lat] },
+      properties: {
+        meter_id: m.meter_id,
+        is_theft: !!m.is_theft,
+        severity: m.severity,
+      },
+    })),
+  };
+  mlMap.getSource('meters').setData(meterFC);
+
+  // Zone bubbles (only shown when density === 'zone' and view === 'meters')
+  let bubbleFC = { type: 'FeatureCollection', features: [] };
+  if ((STATE.localView === 'meters' && STATE.density === 'zone') ||
+      STATE.localView === 'zones' || STATE.localView === 'whatif') {
+    bubbleFC = {
+      type: 'FeatureCollection',
+      features: (STATE.data.zoneForecast || []).map(z => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [z.lon, z.lat] },
+        properties: {
+          zone_id: z.zone_id,
+          zone_name: z.zone_name,
+          risk_level: z.risk_level,
+          flagged_ratio: z.n_flagged / Math.max(1, z.n_meters),
+        },
+      })),
+    };
+  }
+  mlMap.getSource('zone-bubbles').setData(bubbleFC);
+
+  // Toggle layer visibility based on density
+  const meterVis = (STATE.localView === 'meters' && STATE.density === 'meter') ? 'visible' : 'none';
+  const bubbleVis = ((STATE.localView === 'meters' && STATE.density === 'zone') ||
+                     STATE.localView === 'zones' || STATE.localView === 'whatif') ? 'visible' : 'none';
+  mlMap.setLayoutProperty('meters-circle', 'visibility', meterVis);
+  mlMap.setLayoutProperty('zone-bubbles-circle', 'visibility', bubbleVis);
+}
+
 function buildStateAggregates() {
   const agg = {};
   for (const d of STATE.data.intelligence) {
@@ -538,20 +834,20 @@ function switchDashboardMode(mode) {
     if (mlStrip) mlStrip.style.display = 'none';
     if (logoSub) logoSub.textContent = 'Smart Meter Intelligence · Bengaluru';
 
-    if (map) {
-      if (markerLayer) markerLayer.clearLayers();
-      if (stateLayer) map.removeLayer(stateLayer);
-    }
+    // Hide Leaflet map, show MapLibre satellite map
+    document.getElementById('india-map').style.display = 'none';
+    document.getElementById('bengaluru-map').style.display = '';
 
     applyLocalSubView(STATE.localView);
 
+    // Initialize MapLibre on first entry
+    if (!mlMap) initMapLibre();
     setTimeout(() => {
-      if (map) {
-        map.invalidateSize();
-        fitMapToBengaluru();
-        renderMeterMapMarkers();
+      if (mlMap) {
+        mlMap.resize();
+        refreshMapLibreData();
       }
-    }, 120);
+    }, 200);
 
     renderLocalKPIs();
     renderLocalSubView(STATE.localView);
@@ -567,6 +863,10 @@ function switchDashboardMode(mode) {
     document.body.removeAttribute('data-fullbleed');
     const tactical = document.getElementById('tactical-overlay');
     if (tactical) tactical.style.display = 'none';
+
+    // Show Leaflet, hide MapLibre
+    document.getElementById('india-map').style.display = '';
+    document.getElementById('bengaluru-map').style.display = 'none';
 
     setTimeout(() => {
       if (map) {
@@ -590,12 +890,16 @@ function applyLocalSubView(view) {
     if (tactical) tactical.style.display = 'none';
   }
   setTimeout(() => {
-    if (map) {
-      map.invalidateSize();
-      if (STATE.dashboardMode === 'local') {
-        const z = map.getZoom();
-        if (z < 9) fitMapToBengaluru();
+    if (STATE.dashboardMode === 'local') {
+      if (mlMap) {
+        mlMap.resize();
+        if (mlMap.getZoom() < 9) {
+          mlMap.setCenter([BENGALURU_CENTER[1], BENGALURU_CENTER[0]]);
+          mlMap.setZoom(11);
+        }
       }
+    } else if (map) {
+      map.invalidateSize();
     }
   }, 100);
 }
@@ -1120,7 +1424,7 @@ window.drillIntoZone = function(zoneId) {
   const dEl = document.getElementById('bm-density'); if (dEl) dEl.textContent = 'METER';
   const dSub = document.getElementById('bm-density-sub'); if (dSub) dSub.textContent = `drilled into ${z.zone_name}`;
   const metaView = document.getElementById('meta-view'); if (metaView) metaView.textContent = 'METER · ' + z.zone_name.toUpperCase();
-  if (map) map.flyTo([z.lat, z.lon], 13, { duration: 0.6 });
+  if (mlMap) mlMap.flyTo({ center: [z.lon, z.lat], zoom: 13.2, pitch: 55, bearing: -12, duration: 700 });
   renderMeterMapMarkers();
 };
 
@@ -1141,11 +1445,11 @@ function populateZoneChips() {
       list.querySelectorAll('.zone-chip').forEach(c => c.classList.remove('active'));
       if (STATE.selectedZone === z.zone_id) {
         STATE.selectedZone = null;
-        if (map) map.flyTo(BENGALURU_CENTER, 11, { duration: 0.5 });
+        if (mlMap) mlMap.flyTo({ center: [BENGALURU_CENTER[1], BENGALURU_CENTER[0]], zoom: 11, pitch: 55, bearing: -12, duration: 600 });
       } else {
         STATE.selectedZone = z.zone_id;
         chip.classList.add('active');
-        if (map) map.flyTo([z.lat, z.lon], 13, { duration: 0.6 });
+        if (mlMap) mlMap.flyTo({ center: [z.lon, z.lat], zoom: 13.2, pitch: 55, bearing: -12, duration: 700 });
       }
       const metaZ = document.getElementById('meta-zone');
       if (metaZ) metaZ.textContent = STATE.selectedZone ? z.zone_name.toUpperCase() : 'BENGALURU';
@@ -1155,8 +1459,13 @@ function populateZoneChips() {
   });
 }
 
-// ── Local Map Markers (Meter Anomalies = density toggle, others = zones) ──
+// ── Local Map Markers — when in Local mode, dispatch to MapLibre. ──────────
+// (Leaflet path retained as no-op fallback so India view continues to work.)
 function renderMeterMapMarkers() {
+  if (STATE.dashboardMode === 'local') {
+    if (mlMap) refreshMapLibreData();
+    return;
+  }
   if (!map || !markerLayer) return;
   markerLayer.clearLayers();
 
@@ -1359,9 +1668,7 @@ function updateBackButton() {
         const metaView = document.getElementById('meta-view'); if (metaView) metaView.textContent = STATE.density === 'zone' ? 'ZONE' : 'METER';
         const metaZone = document.getElementById('meta-zone'); if (metaZone) metaZone.textContent = 'BENGALURU';
         document.querySelectorAll('.zone-chip').forEach(c => c.classList.remove('active'));
-        if (map) {
-          fitMapToBengaluru();
-        }
+        if (mlMap) mlMap.flyTo({ center: [BENGALURU_CENTER[1], BENGALURU_CENTER[0]], zoom: 11, pitch: 55, bearing: -12, duration: 700 });
         renderMeterMapMarkers();
         updateBackButton();
       });
@@ -2818,8 +3125,8 @@ function bindEvents() {
       const dSub = document.getElementById('bm-density-sub');
       if (dSub) dSub.textContent = STATE.density === 'zone' ? 'click zone to drill in' : (STATE.selectedZone ? 'drilled view' : 'all 576 meters visible');
       const metaView = document.getElementById('meta-view'); if (metaView) metaView.textContent = STATE.density.toUpperCase();
-      if (map && STATE.dashboardMode === 'local') {
-        map.flyTo(BENGALURU_CENTER, 11, { duration: 0.5 });
+      if (STATE.dashboardMode === 'local') {
+        if (mlMap) mlMap.flyTo({ center: [BENGALURU_CENTER[1], BENGALURU_CENTER[0]], zoom: 11, pitch: 55, bearing: -12, duration: 600 });
         renderMeterMapMarkers();
       }
     });
@@ -2838,18 +3145,16 @@ function bindEvents() {
   document.querySelectorAll('.scene-row').forEach(row => {
     row.addEventListener('click', () => {
       const scene = row.dataset.scene;
-      if (!map) return;
       if (scene === 'bengaluru') {
         STATE.selectedZone = null;
-        map.flyTo(BENGALURU_CENTER, 11, { duration: 0.6 });
+        if (mlMap) mlMap.flyTo({ center: [BENGALURU_CENTER[1], BENGALURU_CENTER[0]], zoom: 11, pitch: 55, bearing: -12, duration: 700 });
       } else if (scene === 'flagged') {
         STATE.layerOn = { critical: true, high: true, moderate: true, normal: false };
         document.querySelectorAll('input[data-layer]').forEach(i => {
           i.checked = STATE.layerOn[i.dataset.layer];
         });
       } else if (scene === 'rural') {
-        // fly to peri-urban centroid
-        map.flyTo([13.07, 77.55], 12, { duration: 0.6 });
+        if (mlMap) mlMap.flyTo({ center: [77.55, 13.07], zoom: 12, pitch: 55, bearing: -12, duration: 700 });
       }
       renderMeterMapMarkers();
     });

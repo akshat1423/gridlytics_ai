@@ -10,9 +10,13 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
 
-  <!-- Leaflet -->
+  <!-- Leaflet (kept for India mode + GeoJSON state layer) -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- MapLibre GL (used in Local mode for 3D tilted satellite view, à la Delhi Kavach) -->
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -77,6 +81,7 @@
   <!-- ══════════════ LEFT: MAP PANEL ══════════════ -->
   <aside class="map-panel">
     <div id="india-map"></div>
+    <div id="bengaluru-map" style="display:none"></div>
 
     <!-- Map legend overlay -->
     <div class="map-legend" id="map-legend">
