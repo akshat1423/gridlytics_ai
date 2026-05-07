@@ -473,7 +473,15 @@ function addMapLibreLayers() {
     type: 'circle',
     source: 'meters',
     paint: {
-      'circle-radius': ['case', ['get', 'is_theft'], 5.5, 2.4],
+      // Severity-based radius — red biggest, then orange, then yellow, then green
+      'circle-radius': [
+        'match', ['get', 'severity'],
+        'Critical', 9,
+        'High',     7,
+        'Moderate', 5,
+        'Low',      3.5,
+        4,
+      ],
       'circle-color': [
         'match', ['get', 'severity'],
         'Critical', '#ef4444',
@@ -481,9 +489,26 @@ function addMapLibreLayers() {
         'Moderate', '#f59e0b',
         '#10b981',
       ],
-      'circle-opacity': ['case', ['get', 'is_theft'], 0.92, 0.55],
-      'circle-stroke-color': '#0e1623',
-      'circle-stroke-width': ['case', ['get', 'is_theft'], 1.4, 0],
+      'circle-opacity': [
+        'match', ['get', 'severity'],
+        'Critical', 1.0,
+        'High',     0.95,
+        'Moderate', 0.92,
+        'Low',      0.85,
+        0.85,
+      ],
+      'circle-stroke-color': [
+        'match', ['get', 'severity'],
+        'Critical', '#7f1d1d',
+        'High',     '#9a3412',
+        'Moderate', '#78350f',
+        'Low',      '#064e3b',
+        '#0e1623',
+      ],
+      'circle-stroke-width': ['case', ['get', 'is_theft'], 1.6, 1],
+      'circle-stroke-opacity': 0.85,
+      // Subtle outer glow ring (a second smaller "core")
+      'circle-blur': 0.05,
     },
   });
 

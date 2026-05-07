@@ -255,20 +255,19 @@ table.dt code { font-family: 'JetBrains Mono', monospace; font-size: 10px; color
 }
 #bengaluru-map { z-index: 1; }
 
-/* MapLibre tactical filter — applied to canvas, leaves overlays/markers untouched */
+/* MapLibre tactical filter — light dimming + slight desaturation; markers pop */
 #bengaluru-map .maplibregl-canvas {
-  filter: brightness(0.78) saturate(0.85) contrast(1.18);
+  filter: brightness(0.95) saturate(0.85) contrast(1.08);
 }
 
-/* Subtle green-cyan tactical vignette over MapLibre map */
+/* Very subtle vignette — just edge darkening so the center stays bright */
 body[data-fullbleed="1"] #bengaluru-map::after {
   content: "";
   position: absolute;
   inset: 0;
   pointer-events: none;
   background:
-    radial-gradient(ellipse at center, transparent 50%, rgba(8,13,24,0.40) 100%),
-    linear-gradient(180deg, rgba(8,13,24,0.18) 0%, transparent 25%, transparent 75%, rgba(8,13,24,0.30) 100%);
+    radial-gradient(ellipse at center, transparent 65%, rgba(8,13,24,0.22) 100%);
   z-index: 5;
 }
 
