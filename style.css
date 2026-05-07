@@ -996,6 +996,39 @@ body[data-fullbleed="1"] #tactical-overlay {
   font-family: 'Inter', system-ui, sans-serif;
 }
 
+/* Floating "← All zones" button shown only when drilled into a zone */
+.zone-back-btn {
+  position: absolute;
+  top: 18px;
+  left: 296px;                    /* sits to the right of the left toolbar */
+  z-index: 1101;
+  padding: 8px 14px;
+  background: rgba(8, 13, 24, 0.86);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(59,130,246,0.40);
+  color: #e2e8f0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+  box-shadow: 0 0 16px rgba(59,130,246,0.25);
+}
+.zone-back-btn:hover {
+  border-color: #3b82f6;
+  background: rgba(15, 23, 42, 0.95);
+  box-shadow: 0 0 24px rgba(59,130,246,0.45);
+}
+
+/* Zone boundary polygons — soft, non-intrusive */
+.zone-boundary {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
 /* In fullbleed mode: move Leaflet zoom controls to bottom-right (away from left toolbar) */
 body[data-fullbleed="1"] .leaflet-top.leaflet-left { display: none !important; }
 body[data-fullbleed="1"] .leaflet-control-zoom {

@@ -32,6 +32,7 @@ const STATE = {
     zoneForecast : [],
     evidence     : [],
     whatif       : [],
+    zoneBounds   : null,         // GeoJSON FeatureCollection
   },
 };
 
@@ -202,15 +203,22 @@ const API_ROUTES = {
   zoneForecast : '/api/zone-forecasts',
   evidence     : '/api/evidence-packets',
   whatif       : '/api/whatif-scenarios',
+  zoneBounds   : '/api/zone-boundaries',
 };
 
 // Fetch one key, store result, then immediately render that panel
 async function fetchAndRender(key) {
   try {
     const data = await apiFetch(API_ROUTES[key]);
-    STATE.data[key] = Array.isArray(data) ? data : (data ? [data] : []);
-    if (key === 'hindi' && STATE.data[key].length) STATE.data.hindi = STATE.data[key][0];
-    console.log(`[${key}] ✓ ${STATE.data[key].length} rows`);
+    if (key === 'zoneBounds') {
+      // GeoJSON FeatureCollection — store as-is (not array-wrapped)
+      STATE.data.zoneBounds = data;
+      console.log(`[${key}] ✓ ${(data?.features || []).length} polygons`);
+    } else {
+      STATE.data[key] = Array.isArray(data) ? data : (data ? [data] : []);
+      if (key === 'hindi' && STATE.data[key].length) STATE.data.hindi = STATE.data[key][0];
+      console.log(`[${key}] ✓ ${STATE.data[key].length} rows`);
+    }
   } catch (e) {
     console.error(`[${key}] ✗`, e.message);
     showApiError(`[${key}] ${e.message}`);
@@ -268,6 +276,7 @@ async function fetchAndRender(key) {
     case 'zoneForecast':
     case 'evidence':
     case 'whatif':
+    case 'zoneBounds':
       STATE._localZonesRendered = false;
       STATE._localMetersRendered = false;
       STATE._localInspectorRendered = false;
@@ -963,6 +972,9 @@ function renderMeterMapMarkers() {
   const zones  = STATE.data.zoneForecast || [];
   if (!meters.length) return;
 
+  // Render zone boundary polygons (always, as soft outlines under the markers)
+  renderZoneBoundaries();
+
   // Zone Forecast / What-If: show zone bubbles (one per zone)
   if (STATE.localView === 'zones' || STATE.localView === 'whatif') {
     drawZoneBubbles(zones);
@@ -991,6 +1003,63 @@ function renderMeterMapMarkers() {
   } else {
     drawMeterDots(meters);
   }
+}
+
+// ── Zone boundary polygons (real Bengaluru neighborhood extents) ─────────
+function renderZoneBoundaries() {
+  const fc = STATE.data.zoneBounds;
+  if (!fc || !fc.features) return;
+  const zones = STATE.data.zoneForecast || [];
+
+  fc.features.forEach(f => {
+    const zid = f.properties.zone_id;
+    const zone = zones.find(z => z.zone_id === zid);
+    const isActive = STATE.selectedZone === zid;
+
+    const color = zone
+      ? (zone.risk_level === 'Critical' ? '#ef4444'
+        : zone.risk_level === 'High'    ? '#f97316'
+        : zone.risk_level === 'Moderate' ? '#f59e0b' : '#10b981')
+      : '#64748b';
+
+    L.geoJSON(f, {
+      style: () => ({
+        color,
+        weight: isActive ? 2.5 : 1,
+        opacity: isActive ? 0.9 : 0.5,
+        fillColor: color,
+        fillOpacity: isActive ? 0.18 : 0.06,
+        dashArray: isActive ? null : '4 6',
+        className: 'zone-boundary',
+      }),
+      onEachFeature: (feature, layer) => {
+        layer.bindTooltip(
+          `<b>${feature.properties.zone_name}</b><br/>${feature.properties.type.replace(/_/g, ' ')} · AT&C ${feature.properties.atc_pct}%`,
+          { sticky: true, className: 'leaflet-dark-tooltip' }
+        );
+        layer.on('click', () => {
+          if (zone) {
+            // Click on polygon = drill into that zone
+            STATE.selectedZone = zid;
+            STATE.density = 'meter';
+            document.querySelectorAll('.density-btn').forEach(b => b.classList.toggle('active', b.dataset.density === 'meter'));
+            const dEl = document.getElementById('bm-density'); if (dEl) dEl.textContent = 'METER';
+            const dSub = document.getElementById('bm-density-sub'); if (dSub) dSub.textContent = `drilled into ${zone.zone_name}`;
+            const metaView = document.getElementById('meta-view'); if (metaView) metaView.textContent = 'METER · ' + zone.zone_name.toUpperCase();
+            const metaZone = document.getElementById('meta-zone'); if (metaZone) metaZone.textContent = zone.zone_name.toUpperCase();
+            // Fit map to the zone polygon bounds
+            const b = layer.getBounds();
+            map.flyToBounds(b, { padding: [40, 40], duration: 0.6, maxZoom: 14 });
+            updateBackButton();
+            renderMeterMapMarkers();
+          }
+        });
+        layer.on('mouseover', () => {
+          if (zone) updateDetailPanelForZone(zone, false);
+        });
+      },
+    }).addTo(markerLayer);
+  });
 }
 
 function drawZoneBubbles(zones) {
@@ -1080,22 +1149,38 @@ function drawMeterDots(allMeters) {
     });
   });
 
-  // If drilled-in, show a "back to all zones" pseudo-marker
+  // Drill-back is now handled by the floating button (see updateBackButton)
+  updateBackButton();
+}
+
+// "← Back to Bengaluru" button — appears only when drilled into a zone
+function updateBackButton() {
+  let btn = document.getElementById('zone-back-btn');
   if (STATE.selectedZone) {
-    const z = (STATE.data.zoneForecast || []).find(zz => zz.zone_id === STATE.selectedZone);
-    if (z) {
-      const back = L.circleMarker([z.lat, z.lon], {
-        radius: 26, color: '#3b82f6', weight: 2, fillOpacity: 0.0, dashArray: '4 4',
-      }).addTo(markerLayer);
-      back.bindTooltip(`<b>Drilled: ${z.zone_name}</b><br/>Click to return to Bengaluru-wide`, { sticky: true, className: 'leaflet-dark-tooltip' });
-      back.on('click', () => {
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.id = 'zone-back-btn';
+      btn.className = 'zone-back-btn';
+      btn.addEventListener('click', () => {
         STATE.selectedZone = null;
         const dSub = document.getElementById('bm-density-sub'); if (dSub) dSub.textContent = 'click zone to drill in';
         const metaView = document.getElementById('meta-view'); if (metaView) metaView.textContent = STATE.density === 'zone' ? 'ZONE' : 'METER';
-        map.flyTo(BENGALURU_CENTER, 11, { duration: 0.5 });
+        const metaZone = document.getElementById('meta-zone'); if (metaZone) metaZone.textContent = 'BENGALURU';
+        document.querySelectorAll('.zone-chip').forEach(c => c.classList.remove('active'));
+        if (map) {
+          fitMapToBengaluru();
+        }
         renderMeterMapMarkers();
+        updateBackButton();
       });
+      const overlay = document.getElementById('tactical-overlay');
+      if (overlay) overlay.appendChild(btn);
     }
+    const z = (STATE.data.zoneForecast || []).find(zz => zz.zone_id === STATE.selectedZone);
+    btn.innerHTML = `← All zones <span style="opacity:0.55;margin-left:6px">·  exit ${z ? z.zone_name : ''}</span>`;
+    btn.style.display = '';
+  } else if (btn) {
+    btn.style.display = 'none';
   }
 }
 
