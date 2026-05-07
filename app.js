@@ -313,10 +313,18 @@ async function initMap() {
   setTimeout(() => { map.invalidateSize(); map.setView([22.0, 80.5], 5); }, 100);
   setTimeout(() => { map.invalidateSize(); }, 500);
 
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
-    subdomains : 'abcd',
-    maxZoom    : 18,
+  // Esri World Imagery (satellite) — same source Delhi Kavach uses, no API key required
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    attribution: 'Imagery © Esri, Maxar, Earthstar Geographics',
+    maxZoom: 19,
+    className: 'satellite-tiles',
+  }).addTo(map);
+
+  // Subtle place/road labels overlay (so the satellite isn't unreadable)
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+    maxZoom: 19,
+    opacity: 0.55,
+    className: 'satellite-labels',
   }).addTo(map);
 
   // Load India state boundaries for choropleth (4s timeout — GitHub may be blocked in Databricks env)

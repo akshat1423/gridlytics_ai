@@ -248,6 +248,26 @@ table.dt code { font-family: 'JetBrains Mono', monospace; font-size: 10px; color
 
 #india-map { width: 100%; height: 100%; background: var(--bg); }
 
+/* ─── Satellite tactical look: darken + slight green-cyan tint ─── */
+.leaflet-tile-pane .satellite-tiles {
+  filter: brightness(0.62) saturate(0.95) contrast(1.12);
+}
+.leaflet-tile-pane .satellite-labels {
+  filter: invert(1) brightness(0.85) hue-rotate(180deg) saturate(0.4);
+  mix-blend-mode: screen;
+}
+/* Subtle green vignette overlay to push it toward Delhi-Kavach tactical vibe */
+.map-panel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at center, rgba(16,185,129,0.04) 0%, rgba(8,13,24,0.18) 65%, rgba(8,13,24,0.55) 100%),
+    linear-gradient(180deg, rgba(8,13,24,0.10) 0%, transparent 30%, transparent 70%, rgba(8,13,24,0.20) 100%);
+  z-index: 401;          /* above tiles, below markers */
+}
+
 /* Override Leaflet for dark theme */
 .leaflet-container { background: var(--bg) !important; }
 .leaflet-control-attribution { background: rgba(8,13,24,0.8) !important; color: var(--text-muted) !important; font-size: 9px !important; }
