@@ -4,7 +4,7 @@ Smart Meter Intelligence & Loss Detection Platform — mock-based demo for BESCO
 
 **Live demo:** https://gridlytics.vercel.app
 
-This is a static frontend with pre-generated JSON snapshots under `/api/*`. No backend required
+This is a static frontend with pre-generated JSON snapshots under `/api/*`. No backend required.
 
 ## Deploy
 
