@@ -6,10 +6,13 @@
 
 // ─── Global state ────────────────────────────────────────────────────────────
 const STATE = {
-  dashboardMode: 'india',          // 'india' | 'local'
+  dashboardMode: 'local',          // 'india' | 'local' (LOCAL is the default — BESCOM Theme 8 focus)
   mapView      : 'sm',             // 'tampering' | 'htls' | 'sm' (India sub-view)
-  localView    : 'zones',          // 'zones' | 'meters' | 'inspector' | 'whatif'
-  selectedZone : null,             // currently focused zone in Local mode
+  localView    : 'meters',         // 'meters' | 'zones' | 'inspector' | 'whatif' — Meter Anomalies default
+  density      : 'meter',          // 'meter' | 'zone' — within Meter Anomalies view
+  selectedZone : null,             // currently focused zone (for drill-down)
+  pinnedMeter  : null,             // currently pinned meter (right panel locked)
+  layerOn      : { critical: true, high: true, moderate: true, normal: false },
   iexDays      : 60,
   genDays      : 60,
   battCapacity : 1.0,
@@ -487,16 +490,19 @@ function switchDashboardMode(mode) {
     if (localTog) localTog.style.display = '';
     if (mlStrip) mlStrip.style.display = 'none';
     if (logoSub) logoSub.textContent = 'Smart Meter Intelligence · Bengaluru';
-    // Re-center map to Bengaluru
+
+    // Fly map to Bengaluru
     if (map) {
-      map.flyTo(BENGALURU_CENTER, 11, { duration: 0.8 });
-      // Hide DISCOM markers + state layer
+      map.flyTo(BENGALURU_CENTER, 11, { duration: 0.7 });
       if (markerLayer) markerLayer.clearLayers();
       if (stateLayer) map.removeLayer(stateLayer);
     }
+
+    // Apply current sub-view (which sets fullbleed if meters)
+    applyLocalSubView(STATE.localView);
     renderLocalKPIs();
     renderLocalSubView(STATE.localView);
-    // Render meter markers on the shared map after local data lands
+    populateZoneChips();
     renderMeterMapMarkers();
   } else {
     if (indiaPanel) indiaPanel.style.display = '';
@@ -505,24 +511,50 @@ function switchDashboardMode(mode) {
     if (localTog) localTog.style.display = 'none';
     if (mlStrip && STATE.data.models.length) mlStrip.style.display = '';
     if (logoSub) logoSub.textContent = 'Energy P&L Intelligence · India';
+
+    // Drop fullbleed attr
+    document.body.removeAttribute('data-fullbleed');
+    const tactical = document.getElementById('tactical-overlay');
+    if (tactical) tactical.style.display = 'none';
+
     if (map) {
-      map.flyTo(INDIA_CENTER, 5, { duration: 0.8 });
+      map.flyTo(INDIA_CENTER, 5, { duration: 0.7 });
       if (stateLayer && !map.hasLayer(stateLayer)) map.addLayer(stateLayer);
       renderMapMarkers();
     }
   }
 }
 
+// Apply visual layout for a Local sub-view (toggles fullbleed / tactical overlay)
+function applyLocalSubView(view) {
+  const tactical = document.getElementById('tactical-overlay');
+  if (view === 'meters') {
+    document.body.setAttribute('data-fullbleed', '1');
+    if (tactical) tactical.style.display = 'block';
+  } else {
+    document.body.removeAttribute('data-fullbleed');
+    if (tactical) tactical.style.display = 'none';
+  }
+  // Force map size recalc on layout change
+  setTimeout(() => { if (map) map.invalidateSize(); }, 60);
+}
+
 function switchLocalView(view) {
   STATE.localView = view;
+  STATE.pinnedMeter = null;  // clear pinned state on view change
   ['zones','meters','inspector','whatif'].forEach(v => {
     const el = document.getElementById(`lview-${v}`);
     if (el) el.style.display = v === view ? '' : 'none';
   });
+  applyLocalSubView(view);
   renderLocalSubView(view);
-  // Adjust map markers per sub-view
   if (map && STATE.dashboardMode === 'local') {
     renderMeterMapMarkers();
+  }
+  // Refresh KPIs + chips when entering Meters view (also auto-populates right panel)
+  if (view === 'meters') {
+    renderLocalKPIs();
+    populateZoneChips();
   }
 }
 
@@ -545,7 +577,7 @@ function renderLocalSubView(view) {
   }
 }
 
-// ── Local KPIs ─────────────────────────────────────────────────────────────
+// ── Local KPIs (both inline + bottom-overlay) ──────────────────────────────
 function renderLocalKPIs() {
   const meters = STATE.data.meters || [];
   const zones  = STATE.data.zoneForecast || [];
@@ -556,14 +588,231 @@ function renderLocalKPIs() {
   const monthlyLoss = flagged.reduce((s, m) => s + (m.est_revenue_loss_inr || 0), 0);
 
   const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+
+  // Inline KPI cards (used in non-fullbleed sub-views)
   set('lkpi-meters', meters.length.toLocaleString('en-IN'));
   set('lkpi-flagged', `${flagged.length}`);
   set('lkpi-peak', peakZone ? `${peakZone.peak_mw} MW` : '–');
   set('lkpi-peak-zone', peakZone ? `${peakZone.zone_name} · ${peakZone.peak_hour}:00` : 'next 24h');
   set('lkpi-loss', `₹${(monthlyLoss / 100000).toFixed(1)}L`);
+
+  // Bottom tactical-overlay KPI strip (Meter Anomalies fullbleed view)
+  set('bm-meters', meters.length.toLocaleString('en-IN'));
+  set('bm-flagged', `${flagged.length}`);
+  set('bm-peak', peakZone ? `${peakZone.peak_mw}` : '–');
+  set('bm-peak-zone', peakZone ? `${peakZone.zone_name} @ ${peakZone.peak_hour}:00` : 'next 24h');
+  set('bm-loss', `₹${(monthlyLoss / 100000).toFixed(1)}L`);
+
+  // Layer counts
+  const sevCount = { Critical: 0, High: 0, Moderate: 0, Low: 0 };
+  meters.forEach(m => sevCount[m.severity] = (sevCount[m.severity] || 0) + 1);
+  set('lyr-critical', sevCount.Critical);
+  set('lyr-high', sevCount.High);
+  set('lyr-moderate', sevCount.Moderate);
+  set('lyr-normal', sevCount.Low);
+
+  // Default detail panel content: top alert
+  if (!STATE.pinnedMeter) {
+    const top = (STATE.data.evidence || [])[0];
+    if (top) updateDetailPanelForMeter(findMeterById(top.meter_id) || top, false);
+  }
 }
 
-// ── Local Map Markers (replaces DISCOM circles with meter dots) ────────────
+function findMeterById(id) {
+  return (STATE.data.meters || []).find(m => m.meter_id === id);
+}
+
+// ── Detail panel (right floating) ──────────────────────────────────────────
+function updateDetailPanelForMeter(m, pinned) {
+  const panel = document.getElementById('detail-panel');
+  if (!panel || !m) return;
+
+  // Look up evidence for richer content if this meter has a packet
+  const ev = (STATE.data.evidence || []).find(e => e.meter_id === m.meter_id);
+
+  const sev = m.severity || ev?.severity || 'Low';
+  const pinClass = sev === 'Critical' ? 'pin-critical' : sev === 'High' ? 'pin-high' : sev === 'Moderate' ? 'pin-moderate' : 'pin-low';
+
+  if (!ev) {
+    // Hover/quick view
+    panel.innerHTML = `
+      <div class="detail-head">
+        <span class="detail-id">${m.meter_id || 'METER'}</span>
+        <span class="detail-pin ${pinClass}">${sev}</span>
+      </div>
+      <div class="detail-body">
+        <h4>METER PROFILE</h4>
+        <div class="detail-row"><span>Zone</span><b>${m.zone_name || '–'}</b></div>
+        <div class="detail-row"><span>Feeder</span><b>${m.feeder_id || '–'}</b></div>
+        <div class="detail-row"><span>Category</span><b>${m.category_label || '–'}</b></div>
+        <div class="detail-row"><span>Peer Cohort</span><b><small>${m.peer_cohort || '–'}</small></b></div>
+
+        <h4>CONSUMPTION</h4>
+        <div class="detail-row"><span>Last 24h</span><b class="v-num">${(m.last_24h_kwh || 0).toFixed(1)} kWh</b></div>
+        <div class="detail-row"><span>Avg load</span><b class="v-num">${(m.avg_load_kw || 0).toFixed(2)} kW</b></div>
+        <div class="detail-row"><span>Monthly</span><b class="v-num">${(m.monthly_kwh || 0).toFixed(0)} kWh</b></div>
+
+        <h4>ANOMALY SCORE</h4>
+        <div class="detail-bar">
+          <span class="detail-bar-label">${sev}</span>
+          <div class="detail-bar-track"><div class="detail-bar-fill" style="width:${m.anomaly_score || 0}%"></div></div>
+          <span class="detail-bar-val">${m.anomaly_score || 0}</span>
+        </div>
+        ${m.is_theft ? `<div class="detail-row" style="margin-top:6px"><span>Archetype</span><b>${m.theft_label}</b></div>` : ''}
+      </div>
+    `;
+    return;
+  }
+
+  // Full evidence packet
+  const shapHtml = (ev.shap_features || []).map(f => `
+    <div class="detail-bar">
+      <span class="detail-bar-label">${f.feature}</span>
+      <div class="detail-bar-track"><div class="detail-bar-fill ${f.impact < 0 ? 'neg' : ''}" style="width:${Math.abs(f.impact * 100)}%"></div></div>
+      <span class="detail-bar-val">${f.impact > 0 ? '+' : ''}${f.impact.toFixed(2)}</span>
+    </div>
+  `).join('');
+
+  panel.innerHTML = `
+    <div class="detail-head">
+      <span class="detail-id">${ev.meter_id}</span>
+      <span class="detail-pin ${pinClass}">${sev}</span>
+    </div>
+    <div class="detail-body">
+      <h4>📍 LOCATION</h4>
+      <div class="detail-row"><span>Zone</span><b>${ev.zone_name}</b></div>
+      <div class="detail-row"><span>Feeder</span><b>${ev.feeder_id}</b></div>
+      <div class="detail-row"><span>Category</span><b>${ev.category_label}</b></div>
+
+      <h4>⚠ THEFT INDICATORS</h4>
+      <div class="detail-row"><span>Archetype</span><b>${ev.theft_label}</b></div>
+      <div class="detail-row"><span>Anomaly score</span><b class="v-num">${ev.anomaly_score}/100</b></div>
+      <div class="detail-row"><span>Confidence</span><b class="v-num">${ev.confidence_pct}%</b></div>
+      <div class="detail-row"><span>Est. monthly loss</span><b class="v-num" style="color:#fbbf24">₹${(ev.est_revenue_loss_inr || 0).toLocaleString('en-IN')}</b></div>
+
+      <h4>🔬 SHAP ATTRIBUTION</h4>
+      ${shapHtml}
+
+      <h4>🧠 CAUSAL CHAIN</h4>
+      <ol class="detail-causal">
+        ${(ev.causal_chain || []).map(c => `<li>${c}</li>`).join('')}
+      </ol>
+
+      <h4>🤖 AI BRIEF</h4>
+      <div class="detail-brief">
+        <div class="detail-brief-label">LOCAL LLAMA 3.1 · OFFLINE</div>
+        ${ev.llm_brief}
+      </div>
+
+      <div class="detail-action">
+        <b>RECOMMENDED:</b> ${ev.recommended_action}
+      </div>
+    </div>
+    <div class="detail-actions-row">
+      <button class="detail-act-btn primary" onclick="dispatchInspection('${ev.meter_id}')">DISPATCH INSPECTION</button>
+      <button class="detail-act-btn" onclick="clearPinned()">CLEAR</button>
+    </div>
+  `;
+}
+
+function updateDetailPanelForZone(z, pinned) {
+  const panel = document.getElementById('detail-panel');
+  if (!panel || !z) return;
+
+  const driversBars = Object.entries(z.drivers || {}).map(([k, v]) => `
+    <div class="detail-bar">
+      <span class="detail-bar-label">${k.replace(/_/g, ' ')}</span>
+      <div class="detail-bar-track"><div class="detail-bar-fill" style="width:${(v * 100).toFixed(0)}%"></div></div>
+      <span class="detail-bar-val">${(v * 100).toFixed(0)}%</span>
+    </div>
+  `).join('');
+
+  const pinClass = z.risk_level === 'Critical' ? 'pin-critical' : z.risk_level === 'High' ? 'pin-high' : z.risk_level === 'Moderate' ? 'pin-moderate' : 'pin-low';
+
+  panel.innerHTML = `
+    <div class="detail-head">
+      <span class="detail-id">${z.zone_name.toUpperCase()}</span>
+      <span class="detail-pin ${pinClass}">${z.risk_level}</span>
+    </div>
+    <div class="detail-body">
+      <h4>📊 ZONE METRICS</h4>
+      <div class="detail-row"><span>Type</span><b>${z.type.replace(/_/g, ' ')}</b></div>
+      <div class="detail-row"><span>Meters monitored</span><b class="v-num">${z.n_meters}</b></div>
+      <div class="detail-row"><span>Flagged</span><b class="v-num" style="color:#fca5a5">${z.n_flagged}</b></div>
+
+      <h4>⚡ FORECAST (next 24h)</h4>
+      <div class="detail-row"><span>Peak load</span><b class="v-num">${z.peak_mw} MW @ ${z.peak_hour}:00</b></div>
+      <div class="detail-row"><span>Avg load</span><b class="v-num">${z.avg_mw} MW</b></div>
+      <div class="detail-row"><span>AT&C loss</span><b class="v-num">${z.atc_pct}%</b></div>
+      <div class="detail-row"><span>AC penetration</span><b class="v-num">${(z.ac_penetration * 100).toFixed(0)}%</b></div>
+
+      <h4>🌡️ DRIVER ATTRIBUTION</h4>
+      ${driversBars}
+    </div>
+    ${STATE.localView === 'meters' && STATE.density === 'zone' ? `
+      <div class="detail-actions-row">
+        <button class="detail-act-btn primary" onclick="drillIntoZone('${z.zone_id}')">DRILL INTO METERS</button>
+      </div>` : ''}
+  `;
+}
+
+window.dispatchInspection = function(meterId) {
+  alert(`Inspection dispatched for ${meterId}.\n\n(Demo: in production, this triggers field-team workflow + audit log.)`);
+};
+window.clearPinned = function() {
+  STATE.pinnedMeter = null;
+  const panel = document.getElementById('detail-panel');
+  if (panel) panel.innerHTML = `
+    <div class="detail-empty">
+      <div class="detail-empty-icon">📡</div>
+      <div class="detail-empty-text">Hover or click a meter to inspect</div>
+    </div>`;
+};
+window.drillIntoZone = function(zoneId) {
+  const z = (STATE.data.zoneForecast || []).find(zz => zz.zone_id === zoneId);
+  if (!z) return;
+  STATE.selectedZone = zoneId;
+  STATE.density = 'meter';
+  document.querySelectorAll('.density-btn').forEach(b => b.classList.toggle('active', b.dataset.density === 'meter'));
+  const dEl = document.getElementById('bm-density'); if (dEl) dEl.textContent = 'METER';
+  const dSub = document.getElementById('bm-density-sub'); if (dSub) dSub.textContent = `drilled into ${z.zone_name}`;
+  const metaView = document.getElementById('meta-view'); if (metaView) metaView.textContent = 'METER · ' + z.zone_name.toUpperCase();
+  if (map) map.flyTo([z.lat, z.lon], 13, { duration: 0.6 });
+  renderMeterMapMarkers();
+};
+
+// ── Zone chip list (left toolbar) ─────────────────────────────────────────
+function populateZoneChips() {
+  const list = document.getElementById('zone-chip-list');
+  if (!list) return;
+  const zones = STATE.data.zoneForecast || [];
+  list.innerHTML = zones.map(z => `
+    <span class="zone-chip ${z.n_flagged > 0 ? 'zone-chip-flagged' : ''}" data-zone-id="${z.zone_id}">
+      ${z.zone_name}
+    </span>
+  `).join('');
+  list.querySelectorAll('.zone-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const z = zones.find(zz => zz.zone_id === chip.dataset.zoneId);
+      if (!z) return;
+      list.querySelectorAll('.zone-chip').forEach(c => c.classList.remove('active'));
+      if (STATE.selectedZone === z.zone_id) {
+        STATE.selectedZone = null;
+        if (map) map.flyTo(BENGALURU_CENTER, 11, { duration: 0.5 });
+      } else {
+        STATE.selectedZone = z.zone_id;
+        chip.classList.add('active');
+        if (map) map.flyTo([z.lat, z.lon], 13, { duration: 0.6 });
+      }
+      const metaZ = document.getElementById('meta-zone');
+      if (metaZ) metaZ.textContent = STATE.selectedZone ? z.zone_name.toUpperCase() : 'BENGALURU';
+      renderMeterMapMarkers();
+      updateDetailPanelForZone(z, true);
+    });
+  });
+}
+
+// ── Local Map Markers (Meter Anomalies = density toggle, others = zones) ──
 function renderMeterMapMarkers() {
   if (!map || !markerLayer) return;
   markerLayer.clearLayers();
@@ -572,55 +821,139 @@ function renderMeterMapMarkers() {
   const zones  = STATE.data.zoneForecast || [];
   if (!meters.length) return;
 
-  // For Inspector and Meter views, show individual meter dots (sample for performance)
-  // For Zone view, show one large bubble per zone
+  // Zone Forecast / What-If: show zone bubbles (one per zone)
   if (STATE.localView === 'zones' || STATE.localView === 'whatif') {
-    zones.forEach(z => {
-      const radius = 8 + Math.min(20, (z.peak_mw / 5) * 14);
+    drawZoneBubbles(zones);
+    return;
+  }
+
+  // Inspector queue: highlight only top-20 evidence meters
+  if (STATE.localView === 'inspector') {
+    const ev = STATE.data.evidence || [];
+    ev.forEach(e => {
       const color =
-        z.risk_level === 'Critical' ? '#ef4444' :
-        z.risk_level === 'High'     ? '#f97316' :
-        z.risk_level === 'Moderate' ? '#f59e0b' : '#10b981';
-      const marker = L.circleMarker([z.lat, z.lon], {
-        radius, color, fillColor: color, fillOpacity: 0.55, weight: 2,
+        e.severity === 'Critical' ? '#ef4444' :
+        e.severity === 'High'     ? '#f97316' : '#f59e0b';
+      const marker = L.circleMarker([e.lat, e.lon], {
+        radius: 7, color, fillColor: color, fillOpacity: 0.85, weight: 2,
       }).addTo(markerLayer);
-      marker.bindTooltip(
-        `<b>${z.zone_name}</b><br/>Peak: ${z.peak_mw} MW · ${z.risk_level}<br/>Flagged meters: ${z.n_flagged}/${z.n_meters}`,
-        { sticky: true, className: 'leaflet-dark-tooltip' }
-      );
-      marker.on('click', () => {
+      marker.bindTooltip(`<b>${e.meter_id}</b><br/>${e.zone_name}`, { sticky: true, className: 'leaflet-dark-tooltip' });
+      marker.on('click', () => openMeterEvidence(e.meter_id));
+    });
+    return;
+  }
+
+  // Meter Anomalies — depends on density toggle
+  if (STATE.density === 'zone') {
+    drawZoneBubbles(zones);
+  } else {
+    drawMeterDots(meters);
+  }
+}
+
+function drawZoneBubbles(zones) {
+  if (!zones || !zones.length) return;
+  const focusZone = STATE.selectedZone;
+
+  zones.forEach(z => {
+    const isActive = focusZone && z.zone_id === focusZone;
+    const flaggedRatio = z.n_flagged / Math.max(1, z.n_meters);
+    const radius = 14 + Math.min(28, flaggedRatio * 90);
+    const color =
+      z.risk_level === 'Critical' ? '#ef4444' :
+      z.risk_level === 'High'     ? '#f97316' :
+      z.risk_level === 'Moderate' ? '#f59e0b' : '#10b981';
+
+    const marker = L.circleMarker([z.lat, z.lon], {
+      radius,
+      color,
+      fillColor: color,
+      fillOpacity: isActive ? 0.45 : 0.30,
+      weight: isActive ? 3 : 2,
+      className: 'zone-bubble',
+    }).addTo(markerLayer);
+
+    marker.bindTooltip(
+      `<b>${z.zone_name}</b><br/>Peak ${z.peak_mw} MW · ${z.risk_level}<br/>${z.n_flagged}/${z.n_meters} flagged`,
+      { sticky: true, className: 'leaflet-dark-tooltip' }
+    );
+    marker.on('mouseover', () => updateDetailPanelForZone(z, false));
+    marker.on('click', () => {
+      // In Meter Anomalies + zone density: drill down to meter level for that zone
+      if (STATE.localView === 'meters' && STATE.density === 'zone') {
         STATE.selectedZone = z.zone_id;
-        if (STATE._localZonesRendered) {
-          // Re-render zone forecast for the selected zone
+        STATE.density = 'meter';
+        document.querySelectorAll('.density-btn').forEach(b => b.classList.toggle('active', b.dataset.density === 'meter'));
+        const dEl = document.getElementById('bm-density'); if (dEl) dEl.textContent = 'METER';
+        const dSub = document.getElementById('bm-density-sub'); if (dSub) dSub.textContent = `drilled into ${z.zone_name}`;
+        const metaView = document.getElementById('meta-view'); if (metaView) metaView.textContent = 'METER · ' + z.zone_name.toUpperCase();
+        // Zoom into zone
+        map.flyTo([z.lat, z.lon], 13, { duration: 0.6 });
+        renderMeterMapMarkers();
+      } else {
+        // Zone Forecast / What-If: just select zone for charts
+        STATE.selectedZone = z.zone_id;
+        if (STATE.localView === 'zones') {
           renderZoneHourlyChart(z);
           renderZoneDriversChart(z);
         }
+        updateDetailPanelForZone(z, true);
+      }
+    });
+  });
+}
+
+function drawMeterDots(allMeters) {
+  // Filter by zone if drilled-in
+  let meters = STATE.selectedZone
+    ? allMeters.filter(m => m.zone_id === STATE.selectedZone)
+    : allMeters;
+
+  // Apply layer toggles
+  meters = meters.filter(m => {
+    if (m.severity === 'Critical' && !STATE.layerOn.critical) return false;
+    if (m.severity === 'High'     && !STATE.layerOn.high)     return false;
+    if (m.severity === 'Moderate' && !STATE.layerOn.moderate) return false;
+    if (m.severity === 'Low'      && !STATE.layerOn.normal)   return false;
+    return true;
+  });
+
+  meters.forEach(m => {
+    const isFlagged = m.is_theft;
+    const color =
+      m.severity === 'Critical' ? '#ef4444' :
+      m.severity === 'High'     ? '#f97316' :
+      m.severity === 'Moderate' ? '#f59e0b' : '#10b981';
+    const radius = isFlagged ? 5 : 2.2;
+    const marker = L.circleMarker([m.lat, m.lon], {
+      radius, color, fillColor: color, fillOpacity: isFlagged ? 0.85 : 0.45, weight: isFlagged ? 1.5 : 0,
+    }).addTo(markerLayer);
+
+    marker.on('mouseover', () => {
+      if (!STATE.pinnedMeter) updateDetailPanelForMeter(m, false);
+    });
+    marker.on('click', () => {
+      STATE.pinnedMeter = m.meter_id;
+      updateDetailPanelForMeter(m, true);
+    });
+  });
+
+  // If drilled-in, show a "back to all zones" pseudo-marker
+  if (STATE.selectedZone) {
+    const z = (STATE.data.zoneForecast || []).find(zz => zz.zone_id === STATE.selectedZone);
+    if (z) {
+      const back = L.circleMarker([z.lat, z.lon], {
+        radius: 26, color: '#3b82f6', weight: 2, fillOpacity: 0.0, dashArray: '4 4',
+      }).addTo(markerLayer);
+      back.bindTooltip(`<b>Drilled: ${z.zone_name}</b><br/>Click to return to Bengaluru-wide`, { sticky: true, className: 'leaflet-dark-tooltip' });
+      back.on('click', () => {
+        STATE.selectedZone = null;
+        const dSub = document.getElementById('bm-density-sub'); if (dSub) dSub.textContent = 'click zone to drill in';
+        const metaView = document.getElementById('meta-view'); if (metaView) metaView.textContent = STATE.density === 'zone' ? 'ZONE' : 'METER';
+        map.flyTo(BENGALURU_CENTER, 11, { duration: 0.5 });
+        renderMeterMapMarkers();
       });
-    });
-  } else {
-    // Show flagged meters first (red), then sample of normals
-    const flagged = meters.filter(m => m.is_theft);
-    const normals = meters.filter(m => !m.is_theft).filter((_, i) => i % 4 === 0);  // sample 25%
-
-    flagged.forEach(m => {
-      const color =
-        m.severity === 'Critical' ? '#ef4444' :
-        m.severity === 'High'     ? '#f97316' : '#f59e0b';
-      const marker = L.circleMarker([m.lat, m.lon], {
-        radius: 5, color, fillColor: color, fillOpacity: 0.85, weight: 1.5,
-      }).addTo(markerLayer);
-      marker.bindTooltip(
-        `<b>${m.meter_id}</b><br/>${m.zone_name} · ${m.theft_label}<br/>Score: ${m.anomaly_score}/100`,
-        { sticky: true, className: 'leaflet-dark-tooltip' }
-      );
-      marker.on('click', () => openMeterEvidence(m.meter_id));
-    });
-
-    normals.forEach(m => {
-      L.circleMarker([m.lat, m.lon], {
-        radius: 2, color: '#10b981', fillColor: '#10b981', fillOpacity: 0.4, weight: 0,
-      }).addTo(markerLayer);
-    });
+    }
   }
 }
 
@@ -2053,6 +2386,55 @@ function bindEvents() {
     if (el) el.addEventListener('input', updateWhatIfScenario);
   });
 
+  // Tactical overlay: density toggle (Meter Level / Zone Level)
+  document.querySelectorAll('.density-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.density-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      STATE.density = btn.dataset.density;
+      // Reset zone drill-down when switching to zone density
+      if (STATE.density === 'zone') STATE.selectedZone = null;
+      const dEl = document.getElementById('bm-density'); if (dEl) dEl.textContent = STATE.density.toUpperCase();
+      const dSub = document.getElementById('bm-density-sub');
+      if (dSub) dSub.textContent = STATE.density === 'zone' ? 'click zone to drill in' : (STATE.selectedZone ? 'drilled view' : 'all 576 meters visible');
+      const metaView = document.getElementById('meta-view'); if (metaView) metaView.textContent = STATE.density.toUpperCase();
+      if (map && STATE.dashboardMode === 'local') {
+        map.flyTo(BENGALURU_CENTER, 11, { duration: 0.5 });
+        renderMeterMapMarkers();
+      }
+    });
+  });
+
+  // Tactical overlay: layer toggles
+  document.querySelectorAll('input[data-layer]').forEach(input => {
+    input.addEventListener('change', (e) => {
+      const layer = e.currentTarget.dataset.layer;
+      STATE.layerOn[layer] = e.currentTarget.checked;
+      if (STATE.density === 'meter' && STATE.dashboardMode === 'local') renderMeterMapMarkers();
+    });
+  });
+
+  // Tactical overlay: scenes
+  document.querySelectorAll('.scene-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const scene = row.dataset.scene;
+      if (!map) return;
+      if (scene === 'bengaluru') {
+        STATE.selectedZone = null;
+        map.flyTo(BENGALURU_CENTER, 11, { duration: 0.6 });
+      } else if (scene === 'flagged') {
+        STATE.layerOn = { critical: true, high: true, moderate: true, normal: false };
+        document.querySelectorAll('input[data-layer]').forEach(i => {
+          i.checked = STATE.layerOn[i.dataset.layer];
+        });
+      } else if (scene === 'rural') {
+        // fly to peri-urban centroid
+        map.flyTo([13.07, 77.55], 12, { duration: 0.6 });
+      }
+      renderMeterMapMarkers();
+    });
+  });
+
   // IEX date range
   document.querySelectorAll('#iex-range .pill').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -2150,15 +2532,23 @@ async function boot() {
     }
     document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
 
-    // Restore previously selected mode (India default)
-    let savedMode = 'india';
-    try { savedMode = localStorage.getItem('gridlytics_mode') || 'india'; } catch (e) {}
-    if (savedMode === 'local') {
-      document.querySelectorAll('#mode-toggle .mode-btn').forEach(b => {
-        b.classList.toggle('active', b.dataset.mode === 'local');
-      });
-      switchDashboardMode('local');
-    }
+    // Restore mode (LOCAL is default — BESCOM Theme 8 focus)
+    let savedMode = 'local';
+    try { savedMode = localStorage.getItem('gridlytics_mode') || 'local'; } catch (e) {}
+    document.querySelectorAll('#mode-toggle .mode-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.mode === savedMode);
+    });
+    switchDashboardMode(savedMode);
+
+    // Live REC clock (mimics Delhi Kavach)
+    const tickRec = () => {
+      const el = document.getElementById('meta-time');
+      if (el) {
+        const d = new Date();
+        el.textContent = d.toISOString().replace('T', ' ').slice(0, 19) + 'Z';
+      }
+    };
+    tickRec(); setInterval(tickRec, 1000);
   });
 }
 

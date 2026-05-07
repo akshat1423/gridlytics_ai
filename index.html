@@ -31,35 +31,31 @@
   </div>
 
   <div class="header-center">
-    <!-- BIG INDIA / LOCAL MODE TOGGLE -->
-    <div class="mode-toggle" id="mode-toggle">
-      <button class="mode-btn active" data-mode="india">🇮🇳 India</button>
-      <button class="mode-btn" data-mode="local">📍 Bengaluru (Local)</button>
-    </div>
-
-    <!-- INDIA sub-view toggle -->
-    <div class="map-view-toggle" id="map-view-toggle">
+    <!-- INDIA sub-view toggle (visible only in India mode) -->
+    <div class="map-view-toggle" id="map-view-toggle" style="display:none">
       <button class="toggle-btn" data-view="tampering">⚡ Tampering</button>
       <button class="toggle-btn" data-view="htls">🔌 Wire Loss</button>
       <button class="toggle-btn active" data-view="sm">📟 Smart Meter</button>
     </div>
 
-    <!-- LOCAL sub-view toggle (hidden until Local mode) -->
-    <div class="map-view-toggle local-view-toggle" id="local-view-toggle" style="display:none">
-      <button class="toggle-btn active" data-local-view="zones">📊 Zone Forecast</button>
-      <button class="toggle-btn" data-local-view="meters">🚨 Meter Anomalies</button>
+    <!-- LOCAL sub-view toggle (visible only in Local mode) -->
+    <div class="map-view-toggle local-view-toggle" id="local-view-toggle">
+      <button class="toggle-btn active" data-local-view="meters">🚨 Meter Anomalies</button>
+      <button class="toggle-btn" data-local-view="zones">📊 Zone Forecast</button>
       <button class="toggle-btn" data-local-view="inspector">📋 Inspector Queue</button>
       <button class="toggle-btn" data-local-view="whatif">🔮 What-If</button>
     </div>
   </div>
 
   <div class="header-right">
-    <a class="streamlit-link" href="/streamlit" target="_blank" title="Open Streamlit dashboard">
-      🐍 Streamlit
-    </a>
     <span class="data-badge" id="data-badge">
       <span class="pulse"></span> Live Data
     </span>
+    <!-- INDIA / LOCAL MODE TOGGLE (right corner, replaces Streamlit) -->
+    <div class="mode-toggle" id="mode-toggle">
+      <button class="mode-btn" data-mode="india">🇮🇳 India</button>
+      <button class="mode-btn active" data-mode="local">📍 Local</button>
+    </div>
     <button class="refresh-btn" id="refresh-btn" title="Refresh all data">↺</button>
     <span class="timestamp" id="last-updated">–</span>
   </div>
@@ -98,7 +94,7 @@
   </aside>
 
   <!-- ══════════════ RIGHT: DASHBOARD ══════════════ -->
-  <main class="dashboard mode-section" id="mode-india">
+  <main class="dashboard mode-section" id="mode-india" style="display:none">
 
     <!-- KPI STRIP -->
     <section class="kpi-strip">
@@ -293,10 +289,10 @@
   </main><!-- /mode-india -->
 
   <!-- ══════════════ LOCAL MODE: BENGALURU SMART-METER INTELLIGENCE ══════════════ -->
-  <main class="dashboard mode-section" id="mode-local" style="display:none">
+  <main class="dashboard mode-section" id="mode-local">
 
-    <!-- LOCAL KPI STRIP -->
-    <section class="kpi-strip">
+    <!-- LOCAL KPI STRIP (hidden in fullbleed Meter Anomalies view; bottom overlay replaces it) -->
+    <section class="kpi-strip local-kpi-strip">
       <div class="kpi-card kpi-blue">
         <div class="kpi-label">Active Meters</div>
         <div class="kpi-value" id="lkpi-meters">–</div>
@@ -319,8 +315,8 @@
       </div>
     </section>
 
-    <!-- ═══════════════════ LOCAL VIEW: ZONE FORECAST (default) ═══════════════════ -->
-    <div id="lview-zones" class="view-dashboard">
+    <!-- ═══════════════════ LOCAL VIEW: ZONE FORECAST ═══════════════════ -->
+    <div id="lview-zones" class="view-dashboard" style="display:none">
       <section class="panel panel-full">
         <div class="panel-header">
           <span class="panel-title">📊 Zone Demand Forecast — Next 24h</span>
@@ -355,41 +351,9 @@
       </section>
     </div><!-- /lview-zones -->
 
-    <!-- ═══════════════════ LOCAL VIEW: METER ANOMALIES ═══════════════════ -->
-    <div id="lview-meters" class="view-dashboard" style="display:none">
-      <section class="panel panel-full">
-        <div class="panel-header">
-          <span class="panel-title">🚨 Anomaly Count by Zone</span>
-          <span class="panel-sub">Flagged meters · severity stacked</span>
-        </div>
-        <div class="chart-wrap" style="height:220px"><canvas id="chart-anomaly-zone"></canvas></div>
-      </section>
-
-      <section class="panel-row">
-        <div class="panel">
-          <div class="panel-header">
-            <span class="panel-title">🎭 Theft Archetype Mix</span>
-            <span class="panel-sub">ASTESJ classification</span>
-          </div>
-          <div class="chart-wrap" style="height:260px"><canvas id="chart-archetype"></canvas></div>
-        </div>
-        <div class="panel">
-          <div class="panel-header">
-            <span class="panel-title">📈 Severity Distribution</span>
-            <span class="panel-sub">All 576 monitored meters</span>
-          </div>
-          <div class="chart-wrap" style="height:260px"><canvas id="chart-severity"></canvas></div>
-        </div>
-      </section>
-
-      <section class="panel panel-full">
-        <div class="panel-header">
-          <span class="panel-title">🔍 Top Flagged Meters</span>
-          <span class="panel-sub">Click a meter ID to open evidence packet</span>
-        </div>
-        <div id="meter-table" class="discom-table"></div>
-      </section>
-    </div><!-- /lview-meters -->
+    <!-- ═══════════════════ LOCAL VIEW: METER ANOMALIES (full-bleed map mode) ═══════════════════ -->
+    <!-- This view uses floating tactical overlays (#tactical-overlay below) instead of inline panels -->
+    <div id="lview-meters" class="view-dashboard fullbleed-marker"></div><!-- /lview-meters -->
 
     <!-- ═══════════════════ LOCAL VIEW: INSPECTOR QUEUE ═══════════════════ -->
     <div id="lview-inspector" class="view-dashboard" style="display:none">
@@ -455,6 +419,114 @@
   </main><!-- /mode-local -->
 
 </div><!-- /main-grid -->
+
+<!-- ═══════════════════════════════════════════ TACTICAL OVERLAY (Local + Meter Anomalies) -->
+<div class="tactical-overlay" id="tactical-overlay" style="display:none">
+
+  <!-- LEFT TOOLBAR: density toggle + zone filter + theft archetype filter -->
+  <aside class="overlay-left" id="overlay-left">
+    <div class="overlay-header">
+      <span class="overlay-status">●</span>
+      <span class="overlay-title-main">BESCOM SMART GRID</span>
+      <span class="overlay-sub">CMD-BLR-01 · LIVE OPS</span>
+    </div>
+
+    <div class="overlay-section">
+      <div class="overlay-section-title">DENSITY</div>
+      <div class="density-toggle">
+        <button class="density-btn active" data-density="meter">📍 Meter Level</button>
+        <button class="density-btn" data-density="zone">🌐 Zone Level</button>
+      </div>
+    </div>
+
+    <div class="overlay-section">
+      <div class="overlay-section-title">DATA LAYERS</div>
+      <div class="layer-row">
+        <span class="layer-dot dot-critical"></span>
+        <span class="layer-name">Critical Anomalies</span>
+        <span class="layer-count" id="lyr-critical">–</span>
+        <label class="switch"><input type="checkbox" data-layer="critical" checked><span></span></label>
+      </div>
+      <div class="layer-row">
+        <span class="layer-dot dot-high"></span>
+        <span class="layer-name">High Severity</span>
+        <span class="layer-count" id="lyr-high">–</span>
+        <label class="switch"><input type="checkbox" data-layer="high" checked><span></span></label>
+      </div>
+      <div class="layer-row">
+        <span class="layer-dot dot-moderate"></span>
+        <span class="layer-name">Moderate</span>
+        <span class="layer-count" id="lyr-moderate">–</span>
+        <label class="switch"><input type="checkbox" data-layer="moderate" checked><span></span></label>
+      </div>
+      <div class="layer-row">
+        <span class="layer-dot dot-normal"></span>
+        <span class="layer-name">Normal Meters</span>
+        <span class="layer-count" id="lyr-normal">–</span>
+        <label class="switch"><input type="checkbox" data-layer="normal"><span></span></label>
+      </div>
+    </div>
+
+    <div class="overlay-section">
+      <div class="overlay-section-title">ZONES (12)</div>
+      <div class="zone-chip-list" id="zone-chip-list"></div>
+    </div>
+
+    <div class="overlay-section">
+      <div class="overlay-section-title">SCENES</div>
+      <div class="scene-row" id="scene-bengaluru" data-scene="bengaluru">📍 Bengaluru wide</div>
+      <div class="scene-row" id="scene-flagged" data-scene="flagged">🚨 Flagged meters only</div>
+      <div class="scene-row" id="scene-rural" data-scene="rural">🌾 Peri-urban (Yelahanka, Hebbal, Peenya)</div>
+    </div>
+  </aside>
+
+  <!-- RIGHT FLOATING DETAIL PANEL -->
+  <aside class="overlay-right" id="overlay-right">
+    <div class="detail-panel" id="detail-panel">
+      <div class="detail-empty">
+        <div class="detail-empty-icon">📡</div>
+        <div class="detail-empty-text">Hover or click a meter to inspect</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- BOTTOM KPI STRIP -->
+  <div class="overlay-bottom" id="overlay-bottom">
+    <div class="kpi-mini">
+      <div class="kpi-mini-label">METERS</div>
+      <div class="kpi-mini-val" id="bm-meters">576</div>
+      <div class="kpi-mini-sub">monitored · 12 zones</div>
+    </div>
+    <div class="kpi-mini">
+      <div class="kpi-mini-label">FLAGGED</div>
+      <div class="kpi-mini-val" id="bm-flagged" style="color:#ef4444">–</div>
+      <div class="kpi-mini-sub">⚠ for inspection</div>
+    </div>
+    <div class="kpi-mini">
+      <div class="kpi-mini-label">PEAK MW</div>
+      <div class="kpi-mini-val" id="bm-peak" style="color:#f59e0b">–</div>
+      <div class="kpi-mini-sub" id="bm-peak-zone">next 24h</div>
+    </div>
+    <div class="kpi-mini">
+      <div class="kpi-mini-label">EST LOSS</div>
+      <div class="kpi-mini-val" id="bm-loss" style="color:#10b981">–</div>
+      <div class="kpi-mini-sub">monthly · flagged</div>
+    </div>
+    <div class="kpi-mini">
+      <div class="kpi-mini-label">DENSITY</div>
+      <div class="kpi-mini-val" id="bm-density" style="color:#8b5cf6">METER</div>
+      <div class="kpi-mini-sub" id="bm-density-sub">click zone to drill in</div>
+    </div>
+  </div>
+
+  <!-- TOP-RIGHT META BADGE (mimics Delhi Kavach REC indicator) -->
+  <div class="overlay-meta" id="overlay-meta">
+    <div class="meta-row"><span class="meta-label">REC</span><span id="meta-time"></span></div>
+    <div class="meta-row"><span class="meta-label">ZONE</span><span id="meta-zone">BENGALURU</span></div>
+    <div class="meta-row"><span class="meta-label">VIEW</span><span id="meta-view">METER</span></div>
+  </div>
+
+</div><!-- /tactical-overlay -->
 
 <!-- Blur overlay (behind drawer, over the 10% map strip) -->
 <div class="discom-overlay" id="discom-overlay"></div>
