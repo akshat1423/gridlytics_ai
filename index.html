@@ -376,50 +376,105 @@
 
     <!-- ═══════════════════ LOCAL VIEW: WHAT-IF COUNTERFACTUAL ═══════════════════ -->
     <div id="lview-whatif" class="view-dashboard" style="display:none">
-      <section class="panel panel-full">
+
+      <!-- Scenario summary KPI strip — updates live as sliders move -->
+      <section class="kpi-strip whatif-summary">
+        <div class="kpi-card kpi-amber">
+          <div class="kpi-label">SYSTEM STRESS</div>
+          <div class="kpi-value" id="wif-stress">–</div>
+          <div class="kpi-sub" id="wif-stress-sub">scenario-aggregate</div>
+        </div>
+        <div class="kpi-card kpi-red">
+          <div class="kpi-label">PEAK LOAD</div>
+          <div class="kpi-value" id="wif-peak">–</div>
+          <div class="kpi-sub" id="wif-peak-zone">vs baseline</div>
+        </div>
+        <div class="kpi-card kpi-blue">
+          <div class="kpi-label">EXTRA FLAGGED</div>
+          <div class="kpi-value" id="wif-flagged">–</div>
+          <div class="kpi-sub">heat-stress signatures</div>
+        </div>
+        <div class="kpi-card kpi-green">
+          <div class="kpi-label">ZONES @ RISK</div>
+          <div class="kpi-value" id="wif-risk-zones">–</div>
+          <div class="kpi-sub">Critical or High</div>
+        </div>
+      </section>
+
+      <!-- Scenario controls -->
+      <section class="panel panel-full whatif-control-panel">
         <div class="panel-header">
-          <span class="panel-title">🔮 What-If Scenario Simulator</span>
-          <span class="panel-sub">Counterfactual demand & theft projection · pre-computed grid · instant interpolation</span>
+          <span class="panel-title"><i data-lucide="sliders-horizontal"></i> Scenario Controls</span>
+          <span class="panel-sub">pre-computed scenario grid · instant interpolation · counterfactual demand &amp; theft projection</span>
         </div>
         <div class="whatif-controls">
           <div class="whatif-slider">
-            <label>Heatwave (+°C above baseline): <span id="whatif-heat-val">0</span></label>
+            <div class="whatif-slider-head">
+              <span class="whatif-slider-label"><i data-lucide="thermometer-sun"></i> Heatwave</span>
+              <span class="whatif-slider-val" id="whatif-heat-val">+0°C</span>
+            </div>
             <input type="range" id="whatif-heat" min="0" max="8" step="2" value="0">
+            <div class="whatif-slider-ticks"><span>0</span><span>+2</span><span>+4</span><span>+6</span><span>+8</span></div>
           </div>
           <div class="whatif-slider">
-            <label>AC penetration delta: <span id="whatif-ac-val">0%</span></label>
+            <div class="whatif-slider-head">
+              <span class="whatif-slider-label"><i data-lucide="air-vent"></i> AC penetration delta</span>
+              <span class="whatif-slider-val" id="whatif-ac-val">0%</span>
+            </div>
             <input type="range" id="whatif-ac" min="-20" max="30" step="10" value="0">
+            <div class="whatif-slider-ticks"><span>−20%</span><span>−10%</span><span>0</span><span>+10%</span><span>+20%</span><span>+30%</span></div>
           </div>
-          <div class="whatif-toggle">
-            <label><input type="checkbox" id="whatif-festival"> Festival / weekend boost</label>
+          <div class="whatif-extras">
+            <label class="whatif-toggle"><input type="checkbox" id="whatif-festival"><span class="whatif-toggle-pill"></span><i data-lucide="party-popper"></i> Festival / weekend</label>
+            <button class="whatif-reset-btn" id="whatif-reset"><i data-lucide="rotate-ccw"></i> Reset</button>
           </div>
         </div>
       </section>
 
+      <!-- Comparison row -->
       <section class="panel-row">
         <div class="panel">
           <div class="panel-header">
-            <span class="panel-title">⚡ Re-projected Zone Peak Load</span>
-            <span class="panel-sub">MW · scenario-adjusted</span>
+            <span class="panel-title"><i data-lucide="zap"></i> Baseline vs Scenario · Zone Peak Load</span>
+            <span class="panel-sub">grouped bars · MW · color = new risk tier</span>
           </div>
-          <div class="chart-wrap" style="height:260px"><canvas id="chart-whatif-peak"></canvas></div>
+          <div class="chart-wrap" style="height:300px"><canvas id="chart-whatif-peak"></canvas></div>
         </div>
         <div class="panel">
           <div class="panel-header">
-            <span class="panel-title">🚨 Projected Extra Flagged Meters</span>
-            <span class="panel-sub">Heat-stress driven theft signatures</span>
+            <span class="panel-title"><i data-lucide="siren"></i> Projected Extra Flagged Meters</span>
+            <span class="panel-sub">heat-stress driven theft + AC-tariff mismatches</span>
           </div>
-          <div class="chart-wrap" style="height:260px"><canvas id="chart-whatif-flagged"></canvas></div>
+          <div class="chart-wrap" style="height:300px"><canvas id="chart-whatif-flagged"></canvas></div>
         </div>
       </section>
 
+      <!-- Risk-level redistribution -->
+      <section class="panel-row">
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title"><i data-lucide="bar-chart-3"></i> Risk Level Distribution Shift</span>
+            <span class="panel-sub">how many zones move into each tier</span>
+          </div>
+          <div class="chart-wrap" style="height:240px"><canvas id="chart-whatif-risk"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title"><i data-lucide="list-ordered"></i> Zone Status Change</span>
+            <span class="panel-sub">sorted by Δ peak MW · biggest movers first</span>
+          </div>
+          <div id="whatif-zone-table" class="discom-table" style="max-height:240px;overflow-y:auto"></div>
+        </div>
+      </section>
+
+      <!-- AI narrative -->
       <section class="panel panel-full" style="background:linear-gradient(135deg,#1e1b4b 0%,#0e1623 100%);border-color:#4f46e5">
         <div class="panel-header">
-          <span class="panel-title">🤖 AI Narrative</span>
-          <span class="panel-sub">Generated by local Llama 3.1 (offline)</span>
+          <span class="panel-title"><i data-lucide="bot"></i> AI Narrative</span>
+          <span class="panel-sub">generated by local Llama 3.1 · offline</span>
         </div>
-        <div class="whatif-narrative" id="whatif-narrative" style="padding:14px;color:#e0e7ff;font-size:14px;line-height:1.6">
-          Loading scenario...
+        <div class="whatif-narrative" id="whatif-narrative">
+          Loading scenario…
         </div>
       </section>
     </div><!-- /lview-whatif -->

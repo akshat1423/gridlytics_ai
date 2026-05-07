@@ -2183,69 +2183,223 @@ function updateWhatIfScenario() {
   const acSnap = [-0.2, -0.1, 0, 0.1, 0.2, 0.3].reduce((p, c) => Math.abs(c - ac) < Math.abs(p - ac) ? c : p);
   const key = `h${heatSnap}_a${Math.round(acSnap * 100)}_f${festival ? 1 : 0}`;
   const scenario = scenarios.find(s => s.key === key) || scenarios[0];
+  const baseline = scenarios.find(s => s.key === 'h0_a0_f0') || scenarios[0];
 
-  // Update narrative
+  // ── KPI summary strip ──────────────────────────────────────────────
+  const totalScenarioPeak = scenario.zones.reduce((s, z) => s + z.peak_mw, 0);
+  const totalBaselinePeak = baseline.zones.reduce((s, z) => s + z.peak_mw, 0);
+  const peakDelta = totalScenarioPeak - totalBaselinePeak;
+  const totalExtra = scenario.zones.reduce((s, z) => s + (z.extra_flagged || 0), 0);
+  const riskZones = scenario.zones.filter(z => z.risk_level === 'Critical' || z.risk_level === 'High').length;
+
+  // Stress score: composite of heat + AC + festival, mapped to 0-100
+  const stressScore = Math.min(100, Math.round((heat / 8) * 50 + Math.max(0, ac) * 80 + (festival ? 15 : 0)));
+  const stressLabel = stressScore >= 70 ? 'CRITICAL' : stressScore >= 45 ? 'HIGH' : stressScore >= 20 ? 'MODERATE' : 'NORMAL';
+  const stressColor = stressScore >= 70 ? '#ef4444' : stressScore >= 45 ? '#f97316' : stressScore >= 20 ? '#f59e0b' : '#10b981';
+
+  const set = (id, val, color) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.textContent = val;
+      if (color) el.style.color = color;
+    }
+  };
+  set('wif-stress', `${stressScore}`, stressColor);
+  set('wif-stress-sub', stressLabel);
+  set('wif-peak', `${totalScenarioPeak.toFixed(1)} MW`);
+  const peakSub = peakDelta > 0
+    ? `<span class="delta-up">+${peakDelta.toFixed(1)} MW vs baseline</span>`
+    : peakDelta < 0
+      ? `<span class="delta-down">${peakDelta.toFixed(1)} MW vs baseline</span>`
+      : `<span class="delta-flat">no change</span>`;
+  const peakSubEl = document.getElementById('wif-peak-zone');
+  if (peakSubEl) peakSubEl.innerHTML = peakSub;
+  set('wif-flagged', `+${totalExtra}`, totalExtra > 0 ? '#fbbf24' : '#94a3b8');
+  set('wif-risk-zones', `${riskZones}`, riskZones >= 6 ? '#ef4444' : riskZones >= 3 ? '#f97316' : '#94a3b8');
+
+  // ── Narrative ────────────────────────────────────────────────────
   const narEl = document.getElementById('whatif-narrative');
   if (narEl) narEl.textContent = scenario.narrative;
 
-  // Update peak chart
+  // ── Baseline vs Scenario peak chart (grouped horizontal bars) ───
   const ctx1 = document.getElementById('chart-whatif-peak');
   if (ctx1) {
     if (charts.whatifPeak) charts.whatifPeak.destroy();
     const sortedZones = [...scenario.zones].sort((a, b) => b.peak_mw - a.peak_mw);
+    const baselineMap = Object.fromEntries(baseline.zones.map(z => [z.zone_id, z.peak_mw]));
+    const fillColors = sortedZones.map(z =>
+      z.risk_level === 'Critical' ? 'rgba(239,68,68,0.92)' :
+      z.risk_level === 'High'     ? 'rgba(249,115,22,0.92)' :
+      z.risk_level === 'Moderate' ? 'rgba(245,158,11,0.85)' : 'rgba(16,185,129,0.80)'
+    );
     charts.whatifPeak = new Chart(ctx1, {
       type: 'bar',
       data: {
         labels: sortedZones.map(z => z.zone_name),
-        datasets: [{
-          label: 'Peak MW (re-projected)',
-          data: sortedZones.map(z => z.peak_mw),
-          backgroundColor: sortedZones.map(z =>
-            z.risk_level === 'Critical' ? 'rgba(239,68,68,0.85)' :
-            z.risk_level === 'High'     ? 'rgba(249,115,22,0.85)' :
-            z.risk_level === 'Moderate' ? 'rgba(245,158,11,0.75)' : 'rgba(16,185,129,0.75)'
-          ),
-          borderRadius: 4,
-        }],
+        datasets: [
+          {
+            label: 'Baseline',
+            data: sortedZones.map(z => baselineMap[z.zone_id] || 0),
+            backgroundColor: 'rgba(148,163,184,0.30)',
+            borderColor: 'rgba(148,163,184,0.6)',
+            borderWidth: 1,
+            borderRadius: 3,
+            barPercentage: 0.85,
+            categoryPercentage: 0.85,
+          },
+          {
+            label: 'Scenario',
+            data: sortedZones.map(z => z.peak_mw),
+            backgroundColor: fillColors,
+            borderRadius: 3,
+            barPercentage: 0.85,
+            categoryPercentage: 0.85,
+          },
+        ],
       },
       options: {
         indexAxis: 'y',
         responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
+        layout: { padding: { left: 4, right: 8, top: 6, bottom: 0 } },
+        plugins: {
+          legend: { position: 'top', labels: { color: '#94a3b8', font: { size: 10 }, boxWidth: 10, padding: 10 } },
+          tooltip: {
+            callbacks: {
+              label: (c) => {
+                const z = sortedZones[c.dataIndex];
+                if (c.datasetIndex === 0) return `Baseline: ${c.raw.toFixed(2)} MW`;
+                const delta = z.peak_mw - (baselineMap[z.zone_id] || 0);
+                return [
+                  `Scenario: ${c.raw.toFixed(2)} MW (${z.risk_level})`,
+                  `Δ ${delta > 0 ? '+' : ''}${delta.toFixed(2)} MW`,
+                ];
+              },
+            },
+          },
+        },
         scales: {
-          x: { ticks: { color: '#8899aa', callback: v => `${v} MW` }, grid: { color: '#1e2d42' } },
-          y: { ticks: { color: '#8899aa', font: { size: 10 } }, grid: { display: false } },
+          x: { ticks: { color: '#8899aa', callback: v => `${v} MW`, font: { size: 10 } }, grid: { color: '#1e2d42' } },
+          y: { ticks: { color: '#cbd5e1', font: { size: 10 } }, grid: { display: false } },
         },
       },
     });
   }
 
-  // Update flagged chart
+  // ── Extra flagged meters chart ───────────────────────────────────
   const ctx2 = document.getElementById('chart-whatif-flagged');
   if (ctx2) {
     if (charts.whatifFlagged) charts.whatifFlagged.destroy();
-    const sortedExtra = [...scenario.zones].sort((a, b) => b.extra_flagged - a.extra_flagged).slice(0, 8);
+    const sortedExtra = [...scenario.zones].sort((a, b) => b.extra_flagged - a.extra_flagged).slice(0, 10);
+    const maxExtra = Math.max(1, ...sortedExtra.map(z => z.extra_flagged));
     charts.whatifFlagged = new Chart(ctx2, {
       type: 'bar',
       data: {
         labels: sortedExtra.map(z => z.zone_name),
         datasets: [{
-          label: 'Extra flagged meters',
+          label: 'Extra flagged',
           data: sortedExtra.map(z => z.extra_flagged),
-          backgroundColor: 'rgba(139,92,246,0.75)',
+          backgroundColor: sortedExtra.map(z => {
+            const r = z.extra_flagged / maxExtra;
+            if (r >= 0.7) return 'rgba(239,68,68,0.85)';
+            if (r >= 0.4) return 'rgba(249,115,22,0.85)';
+            if (r >= 0.15) return 'rgba(245,158,11,0.80)';
+            return 'rgba(139,92,246,0.65)';
+          }),
           borderRadius: 4,
         }],
       },
       options: {
         responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
+        layout: { padding: { left: 4, right: 8, top: 6, bottom: 0 } },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: { label: (c) => `+${c.raw} flagged meters · ${sortedExtra[c.dataIndex].risk_level} zone` },
+          },
+        },
         scales: {
           x: { ticks: { color: '#8899aa', font: { size: 9 } }, grid: { color: '#1e2d42' } },
-          y: { ticks: { color: '#8899aa' }, grid: { color: '#1e2d42' } },
+          y: { ticks: { color: '#8899aa', precision: 0 }, grid: { color: '#1e2d42' }, beginAtZero: true },
         },
       },
     });
   }
+
+  // ── Risk distribution shift (baseline vs scenario) ──────────────
+  const ctx3 = document.getElementById('chart-whatif-risk');
+  if (ctx3) {
+    if (charts.whatifRisk) charts.whatifRisk.destroy();
+    const tally = (zones) => {
+      const t = { Critical: 0, High: 0, Moderate: 0, Low: 0 };
+      zones.forEach(z => t[z.risk_level] = (t[z.risk_level] || 0) + 1);
+      return t;
+    };
+    const tBase = tally(baseline.zones);
+    const tScen = tally(scenario.zones);
+    const levels = ['Critical', 'High', 'Moderate', 'Low'];
+    charts.whatifRisk = new Chart(ctx3, {
+      type: 'bar',
+      data: {
+        labels: levels,
+        datasets: [
+          {
+            label: 'Baseline',
+            data: levels.map(l => tBase[l]),
+            backgroundColor: 'rgba(148,163,184,0.40)',
+            borderColor: 'rgba(148,163,184,0.6)',
+            borderWidth: 1,
+          },
+          {
+            label: 'Scenario',
+            data: levels.map(l => tScen[l]),
+            backgroundColor: ['rgba(239,68,68,0.85)','rgba(249,115,22,0.85)','rgba(245,158,11,0.80)','rgba(16,185,129,0.75)'],
+          },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        layout: { padding: { left: 4, right: 8, top: 6, bottom: 0 } },
+        plugins: { legend: { position: 'top', labels: { color: '#94a3b8', font: { size: 10 }, boxWidth: 10, padding: 10 } } },
+        scales: {
+          x: { ticks: { color: '#cbd5e1', font: { size: 11, weight: '600' } }, grid: { display: false } },
+          y: { ticks: { color: '#8899aa', precision: 0 }, grid: { color: '#1e2d42' }, beginAtZero: true },
+        },
+      },
+    });
+  }
+
+  // ── Zone status table (biggest movers) ───────────────────────────
+  const tbl = document.getElementById('whatif-zone-table');
+  if (tbl) {
+    const rowsSorted = [...scenario.zones]
+      .map(z => ({
+        ...z,
+        baseline: (baseline.zones.find(b => b.zone_id === z.zone_id) || {}).peak_mw || 0,
+      }))
+      .map(z => ({ ...z, delta: z.peak_mw - z.baseline }))
+      .sort((a, b) => b.delta - a.delta);
+
+    tbl.innerHTML = `
+      <table class="dt">
+        <thead><tr>
+          <th>Zone</th><th class="num">Baseline</th><th class="num">Scenario</th>
+          <th class="num">Δ MW</th><th>Risk</th><th class="num">+Flagged</th>
+        </tr></thead>
+        <tbody>
+        ${rowsSorted.map(z => `
+          <tr>
+            <td><b>${z.zone_name}</b></td>
+            <td class="num">${z.baseline.toFixed(1)}</td>
+            <td class="num"><b>${z.peak_mw.toFixed(1)}</b></td>
+            <td class="num"><span class="${z.delta > 0 ? 'delta-up' : z.delta < 0 ? 'delta-down' : 'delta-flat'}">${z.delta > 0 ? '+' : ''}${z.delta.toFixed(1)}</span></td>
+            <td><span class="risk-badge risk-${z.risk_level.toLowerCase()}">${z.risk_level}</span></td>
+            <td class="num">${z.extra_flagged > 0 ? '<b style="color:#fbbf24">+' + z.extra_flagged + '</b>' : '–'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  refreshIcons();
 }
 
 // ── Tampering / Theft Analytics Dashboard ─────────────────────────────────
@@ -3135,7 +3289,17 @@ function bindEvents() {
   // What-If sliders (live re-projection)
   ['whatif-heat', 'whatif-ac', 'whatif-festival'].forEach(id => {
     const el = document.getElementById(id);
-    if (el) el.addEventListener('input', updateWhatIfScenario);
+    if (el) {
+      el.addEventListener('input', updateWhatIfScenario);
+      el.addEventListener('change', updateWhatIfScenario);
+    }
+  });
+  const resetBtn = document.getElementById('whatif-reset');
+  if (resetBtn) resetBtn.addEventListener('click', () => {
+    const h = document.getElementById('whatif-heat');     if (h) h.value = 0;
+    const a = document.getElementById('whatif-ac');       if (a) a.value = 0;
+    const f = document.getElementById('whatif-festival'); if (f) f.checked = false;
+    updateWhatIfScenario();
   });
 
   // Tactical overlay: density toggle (Meter Level / Zone Level)
