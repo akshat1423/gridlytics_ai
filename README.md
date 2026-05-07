@@ -5,7 +5,7 @@
 
 Gridlytics turns smart-meter data into actionable, explainable, decision-support intelligence for grid operators and inspection teams. It works as a non-intrusive analytics layer over existing infrastructure — no modifications to deployed meters or grid systems required.
 
-**Live demo:** [gridlytics.vercel.app](https://gridlytics.vercel.app)
+**Live demo:** [gridlytics-ai.vercel.app](https://gridlytics-ai.vercel.app)
 
 ---
 
