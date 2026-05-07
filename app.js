@@ -6,7 +6,10 @@
 
 // ─── Global state ────────────────────────────────────────────────────────────
 const STATE = {
-  mapView      : 'sm',  // 'tampering' | 'htls' | 'sm'
+  dashboardMode: 'india',          // 'india' | 'local'
+  mapView      : 'sm',             // 'tampering' | 'htls' | 'sm' (India sub-view)
+  localView    : 'zones',          // 'zones' | 'meters' | 'inspector' | 'whatif'
+  selectedZone : null,             // currently focused zone in Local mode
   iexDays      : 60,
   genDays      : 60,
   battCapacity : 1.0,
@@ -20,6 +23,12 @@ const STATE = {
     battery      : [],
     models       : [],
     hindi        : null,
+    // Local mode datasets
+    meters       : [],
+    feeders      : [],
+    zoneForecast : [],
+    evidence     : [],
+    whatif       : [],
   },
 };
 
@@ -184,6 +193,12 @@ const API_ROUTES = {
   battery      : '/api/battery',
   models       : '/api/models',
   hindi        : '/api/hindi',
+  // Local mode endpoints (BESCOM smart meter data)
+  meters       : '/api/meters',
+  feeders      : '/api/feeders',
+  zoneForecast : '/api/zone-forecasts',
+  evidence     : '/api/evidence-packets',
+  whatif       : '/api/whatif-scenarios',
 };
 
 // Fetch one key, store result, then immediately render that panel
@@ -245,6 +260,22 @@ async function fetchAndRender(key) {
       STATE._smRendered = false;
       // Render whichever view is currently active
       switchViewDashboard(STATE.mapView);
+      break;
+    case 'meters':
+    case 'feeders':
+    case 'zoneForecast':
+    case 'evidence':
+    case 'whatif':
+      // Reset local lazy-render flags
+      STATE._localZonesRendered = false;
+      STATE._localMetersRendered = false;
+      STATE._localInspectorRendered = false;
+      STATE._localWhatifRendered = false;
+      // If user is already in Local mode, refresh the active sub-view
+      if (STATE.dashboardMode === 'local') {
+        renderLocalKPIs();
+        renderLocalSubView(STATE.localView);
+      }
       break;
   }
 }
@@ -428,6 +459,707 @@ function switchViewDashboard(view) {
   if (view === 'sm' && STATE.data.intelligence.length && !STATE._smRendered) {
     renderSmDashboard();
     STATE._smRendered = true;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//                    LOCAL MODE (BESCOM Smart-Meter Intelligence)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const BENGALURU_CENTER = [12.9716, 77.5946];
+const INDIA_CENTER     = [22.0, 80.5];
+
+function switchDashboardMode(mode) {
+  STATE.dashboardMode = mode;
+  try { localStorage.setItem('gridlytics_mode', mode); } catch (e) {}
+
+  const indiaPanel = document.getElementById('mode-india');
+  const localPanel = document.getElementById('mode-local');
+  const indiaTog   = document.getElementById('map-view-toggle');
+  const localTog   = document.getElementById('local-view-toggle');
+  const mlStrip    = document.getElementById('ml-perf-strip');
+  const logoSub    = document.querySelector('.logo-sub');
+
+  if (mode === 'local') {
+    if (indiaPanel) indiaPanel.style.display = 'none';
+    if (localPanel) localPanel.style.display = '';
+    if (indiaTog) indiaTog.style.display = 'none';
+    if (localTog) localTog.style.display = '';
+    if (mlStrip) mlStrip.style.display = 'none';
+    if (logoSub) logoSub.textContent = 'Smart Meter Intelligence · Bengaluru';
+    // Re-center map to Bengaluru
+    if (map) {
+      map.flyTo(BENGALURU_CENTER, 11, { duration: 0.8 });
+      // Hide DISCOM markers + state layer
+      if (markerLayer) markerLayer.clearLayers();
+      if (stateLayer) map.removeLayer(stateLayer);
+    }
+    renderLocalKPIs();
+    renderLocalSubView(STATE.localView);
+    // Render meter markers on the shared map after local data lands
+    renderMeterMapMarkers();
+  } else {
+    if (indiaPanel) indiaPanel.style.display = '';
+    if (localPanel) localPanel.style.display = 'none';
+    if (indiaTog) indiaTog.style.display = '';
+    if (localTog) localTog.style.display = 'none';
+    if (mlStrip && STATE.data.models.length) mlStrip.style.display = '';
+    if (logoSub) logoSub.textContent = 'Energy P&L Intelligence · India';
+    if (map) {
+      map.flyTo(INDIA_CENTER, 5, { duration: 0.8 });
+      if (stateLayer && !map.hasLayer(stateLayer)) map.addLayer(stateLayer);
+      renderMapMarkers();
+    }
+  }
+}
+
+function switchLocalView(view) {
+  STATE.localView = view;
+  ['zones','meters','inspector','whatif'].forEach(v => {
+    const el = document.getElementById(`lview-${v}`);
+    if (el) el.style.display = v === view ? '' : 'none';
+  });
+  renderLocalSubView(view);
+  // Adjust map markers per sub-view
+  if (map && STATE.dashboardMode === 'local') {
+    renderMeterMapMarkers();
+  }
+}
+
+function renderLocalSubView(view) {
+  if (view === 'zones' && STATE.data.zoneForecast.length && !STATE._localZonesRendered) {
+    renderZoneForecastView();
+    STATE._localZonesRendered = true;
+  }
+  if (view === 'meters' && STATE.data.meters.length && !STATE._localMetersRendered) {
+    renderMeterAnomalyView();
+    STATE._localMetersRendered = true;
+  }
+  if (view === 'inspector' && STATE.data.evidence.length && !STATE._localInspectorRendered) {
+    renderInspectorQueue();
+    STATE._localInspectorRendered = true;
+  }
+  if (view === 'whatif' && STATE.data.whatif.length && !STATE._localWhatifRendered) {
+    renderWhatIfView();
+    STATE._localWhatifRendered = true;
+  }
+}
+
+// ── Local KPIs ─────────────────────────────────────────────────────────────
+function renderLocalKPIs() {
+  const meters = STATE.data.meters || [];
+  const zones  = STATE.data.zoneForecast || [];
+  if (!meters.length) return;
+
+  const flagged = meters.filter(m => m.is_theft);
+  const peakZone = zones.length ? zones.reduce((a, b) => a.peak_mw > b.peak_mw ? a : b) : null;
+  const monthlyLoss = flagged.reduce((s, m) => s + (m.est_revenue_loss_inr || 0), 0);
+
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+  set('lkpi-meters', meters.length.toLocaleString('en-IN'));
+  set('lkpi-flagged', `${flagged.length}`);
+  set('lkpi-peak', peakZone ? `${peakZone.peak_mw} MW` : '–');
+  set('lkpi-peak-zone', peakZone ? `${peakZone.zone_name} · ${peakZone.peak_hour}:00` : 'next 24h');
+  set('lkpi-loss', `₹${(monthlyLoss / 100000).toFixed(1)}L`);
+}
+
+// ── Local Map Markers (replaces DISCOM circles with meter dots) ────────────
+function renderMeterMapMarkers() {
+  if (!map || !markerLayer) return;
+  markerLayer.clearLayers();
+
+  const meters = STATE.data.meters || [];
+  const zones  = STATE.data.zoneForecast || [];
+  if (!meters.length) return;
+
+  // For Inspector and Meter views, show individual meter dots (sample for performance)
+  // For Zone view, show one large bubble per zone
+  if (STATE.localView === 'zones' || STATE.localView === 'whatif') {
+    zones.forEach(z => {
+      const radius = 8 + Math.min(20, (z.peak_mw / 5) * 14);
+      const color =
+        z.risk_level === 'Critical' ? '#ef4444' :
+        z.risk_level === 'High'     ? '#f97316' :
+        z.risk_level === 'Moderate' ? '#f59e0b' : '#10b981';
+      const marker = L.circleMarker([z.lat, z.lon], {
+        radius, color, fillColor: color, fillOpacity: 0.55, weight: 2,
+      }).addTo(markerLayer);
+      marker.bindTooltip(
+        `<b>${z.zone_name}</b><br/>Peak: ${z.peak_mw} MW · ${z.risk_level}<br/>Flagged meters: ${z.n_flagged}/${z.n_meters}`,
+        { sticky: true, className: 'leaflet-dark-tooltip' }
+      );
+      marker.on('click', () => {
+        STATE.selectedZone = z.zone_id;
+        if (STATE._localZonesRendered) {
+          // Re-render zone forecast for the selected zone
+          renderZoneHourlyChart(z);
+          renderZoneDriversChart(z);
+        }
+      });
+    });
+  } else {
+    // Show flagged meters first (red), then sample of normals
+    const flagged = meters.filter(m => m.is_theft);
+    const normals = meters.filter(m => !m.is_theft).filter((_, i) => i % 4 === 0);  // sample 25%
+
+    flagged.forEach(m => {
+      const color =
+        m.severity === 'Critical' ? '#ef4444' :
+        m.severity === 'High'     ? '#f97316' : '#f59e0b';
+      const marker = L.circleMarker([m.lat, m.lon], {
+        radius: 5, color, fillColor: color, fillOpacity: 0.85, weight: 1.5,
+      }).addTo(markerLayer);
+      marker.bindTooltip(
+        `<b>${m.meter_id}</b><br/>${m.zone_name} · ${m.theft_label}<br/>Score: ${m.anomaly_score}/100`,
+        { sticky: true, className: 'leaflet-dark-tooltip' }
+      );
+      marker.on('click', () => openMeterEvidence(m.meter_id));
+    });
+
+    normals.forEach(m => {
+      L.circleMarker([m.lat, m.lon], {
+        radius: 2, color: '#10b981', fillColor: '#10b981', fillOpacity: 0.4, weight: 0,
+      }).addTo(markerLayer);
+    });
+  }
+}
+
+// ── SUB-VIEW 1: Zone Demand Forecast ───────────────────────────────────────
+function renderZoneForecastView() {
+  const zones = STATE.data.zoneForecast || [];
+  if (!zones.length) return;
+
+  // Default selected zone = highest peak
+  if (!STATE.selectedZone) {
+    STATE.selectedZone = zones.reduce((a, b) => a.peak_mw > b.peak_mw ? a : b).zone_id;
+  }
+  const sel = zones.find(z => z.zone_id === STATE.selectedZone) || zones[0];
+
+  renderZoneHourlyChart(sel);
+  renderZonePeakChart(zones);
+  renderZoneDriversChart(sel);
+  renderZoneTable(zones);
+}
+
+function renderZoneHourlyChart(zone) {
+  const ctx = document.getElementById('chart-zone-forecast');
+  if (!ctx) return;
+  if (charts.zoneForecast) charts.zoneForecast.destroy();
+
+  const labels = zone.hourly_forecast.map(h => `${h.hour}:00`);
+  const predicted = zone.hourly_forecast.map(h => h.predicted_mw);
+  const lo = zone.hourly_forecast.map(h => h.confidence_low);
+  const hi = zone.hourly_forecast.map(h => h.confidence_high);
+
+  charts.zoneForecast = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Confidence high',
+          data: hi,
+          borderColor: 'rgba(139,92,246,0.0)',
+          backgroundColor: 'rgba(139,92,246,0.18)',
+          fill: '+1', pointRadius: 0, tension: 0.35,
+        },
+        {
+          label: 'Confidence low',
+          data: lo,
+          borderColor: 'rgba(139,92,246,0.0)',
+          backgroundColor: 'rgba(139,92,246,0.18)',
+          fill: false, pointRadius: 0, tension: 0.35,
+        },
+        {
+          label: `${zone.zone_name} predicted MW`,
+          data: predicted,
+          borderColor: '#8b5cf6',
+          backgroundColor: 'rgba(139,92,246,0.10)',
+          borderWidth: 2.5, pointRadius: 3, tension: 0.35, fill: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: true, position: 'top', labels: { color: '#8899aa', filter: i => i.text.includes('predicted') || i.text.includes('high') } },
+        tooltip: { callbacks: { label: c => `${c.dataset.label}: ${c.raw} MW` } },
+      },
+      scales: {
+        x: { ticks: { color: '#8899aa', font: { size: 9 } }, grid: { color: '#1e2d42' } },
+        y: { ticks: { color: '#8899aa', callback: v => `${v} MW` }, grid: { color: '#1e2d42' } },
+      },
+    },
+  });
+}
+
+function renderZonePeakChart(zones) {
+  const ctx = document.getElementById('chart-zone-peak');
+  if (!ctx) return;
+  if (charts.zonePeak) charts.zonePeak.destroy();
+
+  const sorted = [...zones].sort((a, b) => b.peak_mw - a.peak_mw);
+  const colors = sorted.map(z =>
+    z.risk_level === 'Critical' ? 'rgba(239,68,68,0.85)' :
+    z.risk_level === 'High'     ? 'rgba(249,115,22,0.85)' :
+    z.risk_level === 'Moderate' ? 'rgba(245,158,11,0.75)' : 'rgba(16,185,129,0.75)'
+  );
+
+  charts.zonePeak = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: sorted.map(z => z.zone_name),
+      datasets: [{
+        label: 'Peak MW',
+        data: sorted.map(z => z.peak_mw),
+        backgroundColor: colors,
+        borderRadius: 4,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: c => `${sorted[c.dataIndex].risk_level}: ${c.raw} MW` } },
+      },
+      scales: {
+        x: { ticks: { color: '#8899aa', callback: v => `${v} MW` }, grid: { color: '#1e2d42' } },
+        y: { ticks: { color: '#8899aa', font: { size: 10 } }, grid: { display: false } },
+      },
+      onClick: (_, elements) => {
+        if (elements.length) {
+          STATE.selectedZone = sorted[elements[0].index].zone_id;
+          const sel = STATE.data.zoneForecast.find(z => z.zone_id === STATE.selectedZone);
+          if (sel) {
+            renderZoneHourlyChart(sel);
+            renderZoneDriversChart(sel);
+          }
+        }
+      },
+    },
+  });
+}
+
+function renderZoneDriversChart(zone) {
+  const ctx = document.getElementById('chart-zone-drivers');
+  if (!ctx) return;
+  if (charts.zoneDrivers) charts.zoneDrivers.destroy();
+
+  const sub = document.getElementById('lzone-driver-sub');
+  if (sub) sub.textContent = `${zone.zone_name} · peak ${zone.peak_mw} MW`;
+
+  const drivers = zone.drivers || {};
+  charts.zoneDrivers = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: Object.keys(drivers).map(k => k.replace(/_/g, ' ')),
+      datasets: [{
+        data: Object.values(drivers).map(v => v * 100),
+        backgroundColor: ['#ef4444', '#3b82f6', '#8b5cf6', '#f59e0b'],
+        borderColor: '#0e1623', borderWidth: 2,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#8899aa', font: { size: 10 }, padding: 10 } },
+        tooltip: { callbacks: { label: c => `${c.label}: ${c.raw.toFixed(1)}%` } },
+      },
+    },
+  });
+}
+
+function renderZoneTable(zones) {
+  const el = document.getElementById('zone-table');
+  if (!el) return;
+  const sorted = [...zones].sort((a, b) => b.peak_mw - a.peak_mw);
+  el.innerHTML = `
+    <table class="dt">
+      <thead><tr>
+        <th>Zone</th><th>Type</th><th class="num">Peak MW</th><th class="num">Avg MW</th>
+        <th class="num">AT&C %</th><th class="num">Flagged</th><th>Risk</th>
+      </tr></thead>
+      <tbody>
+      ${sorted.map(z => `
+        <tr class="dt-clickable" data-zone-id="${z.zone_id}">
+          <td><b>${z.zone_name}</b></td>
+          <td><small>${z.type.replace(/_/g, ' ')}</small></td>
+          <td class="num">${z.peak_mw}</td>
+          <td class="num">${z.avg_mw}</td>
+          <td class="num">${z.atc_pct}%</td>
+          <td class="num">${z.n_flagged}/${z.n_meters}</td>
+          <td><span class="risk-badge risk-${z.risk_level.toLowerCase()}">${z.risk_level}</span></td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  el.querySelectorAll('.dt-clickable').forEach(tr => {
+    tr.addEventListener('click', () => {
+      STATE.selectedZone = tr.dataset.zoneId;
+      const sel = zones.find(z => z.zone_id === STATE.selectedZone);
+      if (sel) { renderZoneHourlyChart(sel); renderZoneDriversChart(sel); }
+    });
+  });
+}
+
+// ── SUB-VIEW 2: Meter-Level Anomaly Detection ──────────────────────────────
+function renderMeterAnomalyView() {
+  const meters = STATE.data.meters || [];
+  if (!meters.length) return;
+
+  // Anomaly count by zone (stacked by severity)
+  const byZone = {};
+  meters.forEach(m => {
+    if (!byZone[m.zone_name]) byZone[m.zone_name] = { Critical: 0, High: 0, Moderate: 0 };
+    if (m.is_theft) byZone[m.zone_name][m.severity]++;
+  });
+  const zones = Object.keys(byZone).sort((a, b) => {
+    const sa = byZone[a].Critical + byZone[a].High + byZone[a].Moderate;
+    const sb = byZone[b].Critical + byZone[b].High + byZone[b].Moderate;
+    return sb - sa;
+  });
+
+  const ctx1 = document.getElementById('chart-anomaly-zone');
+  if (ctx1) {
+    if (charts.anomalyZone) charts.anomalyZone.destroy();
+    charts.anomalyZone = new Chart(ctx1, {
+      type: 'bar',
+      data: {
+        labels: zones,
+        datasets: [
+          { label: 'Critical', data: zones.map(z => byZone[z].Critical), backgroundColor: 'rgba(239,68,68,0.85)' },
+          { label: 'High',     data: zones.map(z => byZone[z].High),     backgroundColor: 'rgba(249,115,22,0.85)' },
+          { label: 'Moderate', data: zones.map(z => byZone[z].Moderate), backgroundColor: 'rgba(245,158,11,0.75)' },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: 'top', labels: { color: '#8899aa', font: { size: 10 } } } },
+        scales: {
+          x: { stacked: true, ticks: { color: '#8899aa', font: { size: 9 } }, grid: { color: '#1e2d42' } },
+          y: { stacked: true, ticks: { color: '#8899aa' }, grid: { color: '#1e2d42' } },
+        },
+      },
+    });
+  }
+
+  // Theft archetype mix
+  const archCount = {};
+  meters.forEach(m => { if (m.theft_label) archCount[m.theft_label] = (archCount[m.theft_label] || 0) + 1; });
+  const ctx2 = document.getElementById('chart-archetype');
+  if (ctx2) {
+    if (charts.archetype) charts.archetype.destroy();
+    charts.archetype = new Chart(ctx2, {
+      type: 'doughnut',
+      data: {
+        labels: Object.keys(archCount),
+        datasets: [{
+          data: Object.values(archCount),
+          backgroundColor: ['#ef4444', '#f97316', '#8b5cf6', '#06b6d4'],
+          borderColor: '#0e1623', borderWidth: 2,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'bottom', labels: { color: '#8899aa', font: { size: 10 }, padding: 10 } },
+          tooltip: { callbacks: { label: c => `${c.label}: ${c.raw} cases` } },
+        },
+      },
+    });
+  }
+
+  // Severity distribution (incl. Low)
+  const sev = { Critical: 0, High: 0, Moderate: 0, Low: 0 };
+  meters.forEach(m => sev[m.severity] = (sev[m.severity] || 0) + 1);
+  const ctx3 = document.getElementById('chart-severity');
+  if (ctx3) {
+    if (charts.severityDist) charts.severityDist.destroy();
+    charts.severityDist = new Chart(ctx3, {
+      type: 'bar',
+      data: {
+        labels: ['Critical', 'High', 'Moderate', 'Low'],
+        datasets: [{
+          data: ['Critical','High','Moderate','Low'].map(k => sev[k]),
+          backgroundColor: ['rgba(239,68,68,0.85)','rgba(249,115,22,0.85)','rgba(245,158,11,0.75)','rgba(16,185,129,0.7)'],
+          borderRadius: 4,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#8899aa' }, grid: { color: '#1e2d42' } },
+          y: { ticks: { color: '#8899aa' }, grid: { color: '#1e2d42' } },
+        },
+      },
+    });
+  }
+
+  // Top flagged meters table
+  const flagged = meters.filter(m => m.is_theft).sort((a, b) => b.anomaly_score - a.anomaly_score).slice(0, 30);
+  const tbl = document.getElementById('meter-table');
+  if (tbl) {
+    tbl.innerHTML = `
+      <table class="dt">
+        <thead><tr>
+          <th>Meter ID</th><th>Zone</th><th>Category</th><th>Archetype</th>
+          <th class="num">Score</th><th class="num">Loss ₹/mo</th><th>Severity</th>
+        </tr></thead>
+        <tbody>
+        ${flagged.map(m => `
+          <tr class="dt-clickable" data-meter-id="${m.meter_id}">
+            <td><code>${m.meter_id}</code></td>
+            <td>${m.zone_name}</td>
+            <td><small>${m.category_label}</small></td>
+            <td><small>${m.theft_label}</small></td>
+            <td class="num"><b>${m.anomaly_score}</b></td>
+            <td class="num">₹${(m.est_revenue_loss_inr || 0).toLocaleString('en-IN')}</td>
+            <td><span class="risk-badge risk-${m.severity.toLowerCase()}">${m.severity}</span></td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+    tbl.querySelectorAll('.dt-clickable').forEach(tr => {
+      tr.addEventListener('click', () => openMeterEvidence(tr.dataset.meterId));
+    });
+  }
+}
+
+// ── SUB-VIEW 3: Inspector Queue ────────────────────────────────────────────
+function renderInspectorQueue() {
+  const evidence = STATE.data.evidence || [];
+  const el = document.getElementById('inspector-queue');
+  if (!el || !evidence.length) return;
+
+  el.innerHTML = evidence.map((e, i) => `
+    <div class="inspector-card severity-${e.severity}" data-meter-id="${e.meter_id}">
+      <div class="inspector-card-head">
+        <span class="inspector-card-id">#${(i+1).toString().padStart(2,'0')} · ${e.meter_id}</span>
+        <span class="inspector-card-arch">${e.theft_label}</span>
+      </div>
+      <div class="inspector-card-meta">
+        <span>📍 <b>${e.zone_name}</b></span>
+        <span>Confidence <b>${e.confidence_pct}%</b></span>
+        <span>Loss <b>₹${(e.est_revenue_loss_inr || 0).toLocaleString('en-IN')}/mo</b></span>
+        <span>Action: <b>${e.recommended_action}</b></span>
+      </div>
+    </div>
+  `).join('');
+  el.querySelectorAll('.inspector-card').forEach(card => {
+    card.addEventListener('click', () => openMeterEvidence(card.dataset.meterId));
+  });
+}
+
+// ── Meter evidence drawer (opens the existing DISCOM drawer with meter content) ─
+function openMeterEvidence(meterId) {
+  const ev = (STATE.data.evidence || []).find(e => e.meter_id === meterId);
+  if (!ev) return;
+
+  const drawer = document.getElementById('discom-drawer');
+  const overlay = document.getElementById('discom-overlay');
+  if (!drawer) return;
+
+  // Build evidence drawer content
+  drawer.innerHTML = `
+    <div class="dd-header">
+      <button class="dd-back" id="dd-back" title="Back">← Back</button>
+      <div class="dd-header-center">
+        <div class="dd-title">${ev.meter_id}</div>
+        <div class="dd-sub">${ev.zone_name} · ${ev.feeder_id} · ${ev.category_label}</div>
+      </div>
+    </div>
+
+    <div class="dd-body">
+      <div class="dd-section">
+        <div class="dd-kpi-row" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:14px">
+          <div class="dd-kpi"><div class="dd-kpi-label">Anomaly Score</div><div class="dd-kpi-value" style="color:#ef4444">${ev.anomaly_score}</div></div>
+          <div class="dd-kpi"><div class="dd-kpi-label">Confidence</div><div class="dd-kpi-value">${ev.confidence_pct}%</div></div>
+          <div class="dd-kpi"><div class="dd-kpi-label">Est. Loss</div><div class="dd-kpi-value" style="color:#f59e0b">₹${(ev.est_revenue_loss_inr || 0).toLocaleString('en-IN')}/mo</div></div>
+        </div>
+      </div>
+
+      <div class="dd-section">
+        <div class="dd-section-title">⚡ 7-day 15-min consumption (observed vs peer baseline)</div>
+        <div class="chart-wrap" style="height:200px"><canvas id="chart-evidence-ts"></canvas></div>
+      </div>
+
+      <div class="dd-section">
+        <div class="dd-section-title">🔬 SHAP-style feature attribution</div>
+        <div class="chart-wrap" style="height:180px"><canvas id="chart-evidence-shap"></canvas></div>
+      </div>
+
+      <div class="dd-section">
+        <div class="dd-section-title">🧠 Causal reasoning chain</div>
+        <ol style="padding:8px 24px;line-height:1.7;font-size:13px;color:#cbd5e1">
+          ${ev.causal_chain.map(c => `<li>${c}</li>`).join('')}
+        </ol>
+      </div>
+
+      <div class="dd-section" style="background:linear-gradient(135deg,#1e1b4b 0%,#0e1623 100%);border-radius:8px;margin:8px;padding:14px;border:1px solid #4f46e5">
+        <div class="dd-section-title">🤖 AI Brief (local Llama 3.1)</div>
+        <p style="color:#e0e7ff;font-size:13px;line-height:1.6;margin:8px 0 0">${ev.llm_brief}</p>
+      </div>
+
+      <div class="dd-section">
+        <div class="dd-section-title">📋 Recommended Action</div>
+        <div style="padding:12px;background:rgba(239,68,68,0.08);border-left:3px solid #ef4444;border-radius:4px;margin:8px;color:#fecaca">
+          <b>${ev.recommended_action}</b>
+        </div>
+      </div>
+    </div>
+  `;
+
+  drawer.classList.add('open');
+  if (overlay) overlay.classList.add('open');
+
+  // Wire back button
+  const backBtn = document.getElementById('dd-back');
+  if (backBtn) backBtn.addEventListener('click', () => {
+    drawer.classList.remove('open');
+    if (overlay) overlay.classList.remove('open');
+  });
+  if (overlay) overlay.addEventListener('click', () => {
+    drawer.classList.remove('open');
+    overlay.classList.remove('open');
+  }, { once: true });
+
+  // Render time-series chart
+  setTimeout(() => {
+    const ctxTs = document.getElementById('chart-evidence-ts');
+    if (ctxTs && ev.observed_kw_15min) {
+      const labels = ev.observed_kw_15min.map((_, i) => i % 96 === 0 ? `D${Math.floor(i/96)+1}` : '');
+      new Chart(ctxTs, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            { label: 'Peer cohort baseline', data: ev.peer_baseline_kw_15min, borderColor: '#10b981', borderWidth: 1.5, pointRadius: 0, tension: 0.2 },
+            { label: 'Observed (this meter)', data: ev.observed_kw_15min,     borderColor: '#ef4444', borderWidth: 1.5, pointRadius: 0, tension: 0.2 },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { position: 'top', labels: { color: '#8899aa', font: { size: 10 } } } },
+          scales: {
+            x: { ticks: { color: '#8899aa', font: { size: 9 }, autoSkip: false }, grid: { color: '#1e2d42' } },
+            y: { ticks: { color: '#8899aa', callback: v => `${v} kW` }, grid: { color: '#1e2d42' } },
+          },
+        },
+      });
+    }
+
+    const ctxShap = document.getElementById('chart-evidence-shap');
+    if (ctxShap && ev.shap_features) {
+      new Chart(ctxShap, {
+        type: 'bar',
+        data: {
+          labels: ev.shap_features.map(s => s.feature),
+          datasets: [{
+            data: ev.shap_features.map(s => s.impact),
+            backgroundColor: ev.shap_features.map(s => s.impact > 0 ? 'rgba(239,68,68,0.85)' : 'rgba(16,185,129,0.7)'),
+            borderRadius: 4,
+          }],
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => `Impact: ${c.raw > 0 ? '+' : ''}${c.raw.toFixed(2)}` } } },
+          scales: {
+            x: { ticks: { color: '#8899aa' }, grid: { color: '#1e2d42' } },
+            y: { ticks: { color: '#8899aa', font: { size: 11 } }, grid: { display: false } },
+          },
+        },
+      });
+    }
+  }, 50);
+}
+
+// ── SUB-VIEW 4: What-If Counterfactual ─────────────────────────────────────
+function renderWhatIfView() {
+  updateWhatIfScenario();
+}
+
+function updateWhatIfScenario() {
+  const scenarios = STATE.data.whatif || [];
+  if (!scenarios.length) return;
+
+  const heat = parseInt(document.getElementById('whatif-heat')?.value || 0);
+  const acRaw = parseInt(document.getElementById('whatif-ac')?.value || 0);
+  const ac = acRaw / 100;
+  const festival = document.getElementById('whatif-festival')?.checked || false;
+
+  const heatEl = document.getElementById('whatif-heat-val');
+  const acEl = document.getElementById('whatif-ac-val');
+  if (heatEl) heatEl.textContent = `+${heat}°C`;
+  if (acEl) acEl.textContent = `${acRaw > 0 ? '+' : ''}${acRaw}%`;
+
+  // Snap to nearest pre-computed scenario key
+  const heatSnap = [0, 2, 4, 6, 8].reduce((p, c) => Math.abs(c - heat) < Math.abs(p - heat) ? c : p);
+  const acSnap = [-0.2, -0.1, 0, 0.1, 0.2, 0.3].reduce((p, c) => Math.abs(c - ac) < Math.abs(p - ac) ? c : p);
+  const key = `h${heatSnap}_a${Math.round(acSnap * 100)}_f${festival ? 1 : 0}`;
+  const scenario = scenarios.find(s => s.key === key) || scenarios[0];
+
+  // Update narrative
+  const narEl = document.getElementById('whatif-narrative');
+  if (narEl) narEl.textContent = scenario.narrative;
+
+  // Update peak chart
+  const ctx1 = document.getElementById('chart-whatif-peak');
+  if (ctx1) {
+    if (charts.whatifPeak) charts.whatifPeak.destroy();
+    const sortedZones = [...scenario.zones].sort((a, b) => b.peak_mw - a.peak_mw);
+    charts.whatifPeak = new Chart(ctx1, {
+      type: 'bar',
+      data: {
+        labels: sortedZones.map(z => z.zone_name),
+        datasets: [{
+          label: 'Peak MW (re-projected)',
+          data: sortedZones.map(z => z.peak_mw),
+          backgroundColor: sortedZones.map(z =>
+            z.risk_level === 'Critical' ? 'rgba(239,68,68,0.85)' :
+            z.risk_level === 'High'     ? 'rgba(249,115,22,0.85)' :
+            z.risk_level === 'Moderate' ? 'rgba(245,158,11,0.75)' : 'rgba(16,185,129,0.75)'
+          ),
+          borderRadius: 4,
+        }],
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#8899aa', callback: v => `${v} MW` }, grid: { color: '#1e2d42' } },
+          y: { ticks: { color: '#8899aa', font: { size: 10 } }, grid: { display: false } },
+        },
+      },
+    });
+  }
+
+  // Update flagged chart
+  const ctx2 = document.getElementById('chart-whatif-flagged');
+  if (ctx2) {
+    if (charts.whatifFlagged) charts.whatifFlagged.destroy();
+    const sortedExtra = [...scenario.zones].sort((a, b) => b.extra_flagged - a.extra_flagged).slice(0, 8);
+    charts.whatifFlagged = new Chart(ctx2, {
+      type: 'bar',
+      data: {
+        labels: sortedExtra.map(z => z.zone_name),
+        datasets: [{
+          label: 'Extra flagged meters',
+          data: sortedExtra.map(z => z.extra_flagged),
+          backgroundColor: 'rgba(139,92,246,0.75)',
+          borderRadius: 4,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#8899aa', font: { size: 9 } }, grid: { color: '#1e2d42' } },
+          y: { ticks: { color: '#8899aa' }, grid: { color: '#1e2d42' } },
+        },
+      },
+    });
   }
 }
 
@@ -1288,13 +2020,37 @@ function renderDiscomTable() {
 // ═══════════════════════════════════════════════════════════════════════ EVENTS
 
 function bindEvents() {
-  // Map view toggle
-  document.querySelectorAll('.toggle-btn').forEach(btn => {
+  // INDIA sub-view toggle (scoped to #map-view-toggle)
+  document.querySelectorAll('#map-view-toggle .toggle-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
-      document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('#map-view-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
       e.currentTarget.classList.add('active');
       updateMapView(e.currentTarget.dataset.view);
     });
+  });
+
+  // BIG INDIA / LOCAL MODE TOGGLE
+  document.querySelectorAll('#mode-toggle .mode-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      document.querySelectorAll('#mode-toggle .mode-btn').forEach(b => b.classList.remove('active'));
+      e.currentTarget.classList.add('active');
+      switchDashboardMode(e.currentTarget.dataset.mode);
+    });
+  });
+
+  // LOCAL sub-view toggle (Zone Forecast / Meter Anomalies / Inspector / What-If)
+  document.querySelectorAll('#local-view-toggle .toggle-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      document.querySelectorAll('#local-view-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
+      e.currentTarget.classList.add('active');
+      switchLocalView(e.currentTarget.dataset.localView);
+    });
+  });
+
+  // What-If sliders (live re-projection)
+  ['whatif-heat', 'whatif-ac', 'whatif-festival'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', updateWhatIfScenario);
   });
 
   // IEX date range
@@ -1393,6 +2149,16 @@ async function boot() {
       if (_rmse) _rmse.textContent = `GBT Model · RMSE: ${toFloat(fc.rmse).toFixed(3)} ₹/kWh · R²: ${toFloat(fc.r2).toFixed(3)}`;
     }
     document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+    // Restore previously selected mode (India default)
+    let savedMode = 'india';
+    try { savedMode = localStorage.getItem('gridlytics_mode') || 'india'; } catch (e) {}
+    if (savedMode === 'local') {
+      document.querySelectorAll('#mode-toggle .mode-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.mode === 'local');
+      });
+      switchDashboardMode('local');
+    }
   });
 }
 

@@ -31,10 +31,25 @@
   </div>
 
   <div class="header-center">
+    <!-- BIG INDIA / LOCAL MODE TOGGLE -->
+    <div class="mode-toggle" id="mode-toggle">
+      <button class="mode-btn active" data-mode="india">🇮🇳 India</button>
+      <button class="mode-btn" data-mode="local">📍 Bengaluru (Local)</button>
+    </div>
+
+    <!-- INDIA sub-view toggle -->
     <div class="map-view-toggle" id="map-view-toggle">
       <button class="toggle-btn" data-view="tampering">⚡ Tampering</button>
       <button class="toggle-btn" data-view="htls">🔌 Wire Loss</button>
       <button class="toggle-btn active" data-view="sm">📟 Smart Meter</button>
+    </div>
+
+    <!-- LOCAL sub-view toggle (hidden until Local mode) -->
+    <div class="map-view-toggle local-view-toggle" id="local-view-toggle" style="display:none">
+      <button class="toggle-btn active" data-local-view="zones">📊 Zone Forecast</button>
+      <button class="toggle-btn" data-local-view="meters">🚨 Meter Anomalies</button>
+      <button class="toggle-btn" data-local-view="inspector">📋 Inspector Queue</button>
+      <button class="toggle-btn" data-local-view="whatif">🔮 What-If</button>
     </div>
   </div>
 
@@ -83,7 +98,7 @@
   </aside>
 
   <!-- ══════════════ RIGHT: DASHBOARD ══════════════ -->
-  <main class="dashboard" id="dashboard">
+  <main class="dashboard mode-section" id="mode-india">
 
     <!-- KPI STRIP -->
     <section class="kpi-strip">
@@ -275,7 +290,170 @@
       <div id="discom-table" class="discom-table"></div>
     </section>
 
-  </main><!-- /dashboard -->
+  </main><!-- /mode-india -->
+
+  <!-- ══════════════ LOCAL MODE: BENGALURU SMART-METER INTELLIGENCE ══════════════ -->
+  <main class="dashboard mode-section" id="mode-local" style="display:none">
+
+    <!-- LOCAL KPI STRIP -->
+    <section class="kpi-strip">
+      <div class="kpi-card kpi-blue">
+        <div class="kpi-label">Active Meters</div>
+        <div class="kpi-value" id="lkpi-meters">–</div>
+        <div class="kpi-sub">15-min interval · 12 BESCOM zones</div>
+      </div>
+      <div class="kpi-card kpi-red">
+        <div class="kpi-label">Flagged for Inspection</div>
+        <div class="kpi-value" id="lkpi-flagged">–</div>
+        <div class="kpi-sub">Critical · High · Moderate</div>
+      </div>
+      <div class="kpi-card kpi-amber">
+        <div class="kpi-label">Predicted Peak Load</div>
+        <div class="kpi-value" id="lkpi-peak">–</div>
+        <div class="kpi-sub" id="lkpi-peak-zone">next 24h</div>
+      </div>
+      <div class="kpi-card kpi-green">
+        <div class="kpi-label">Est. Monthly Loss</div>
+        <div class="kpi-value" id="lkpi-loss">–</div>
+        <div class="kpi-sub">across flagged meters</div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════ LOCAL VIEW: ZONE FORECAST (default) ═══════════════════ -->
+    <div id="lview-zones" class="view-dashboard">
+      <section class="panel panel-full">
+        <div class="panel-header">
+          <span class="panel-title">📊 Zone Demand Forecast — Next 24h</span>
+          <span class="panel-sub">Hourly forecast · 12 Bengaluru zones · with confidence band</span>
+        </div>
+        <div class="chart-wrap" style="height:240px"><canvas id="chart-zone-forecast"></canvas></div>
+      </section>
+
+      <section class="panel-row">
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">⚡ Peak Load Risk by Zone</span>
+            <span class="panel-sub">Predicted MW · ranked</span>
+          </div>
+          <div class="chart-wrap" style="height:260px"><canvas id="chart-zone-peak"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">🌡️ Driver Attribution</span>
+            <span class="panel-sub" id="lzone-driver-sub">selected zone</span>
+          </div>
+          <div class="chart-wrap" style="height:260px"><canvas id="chart-zone-drivers"></canvas></div>
+        </div>
+      </section>
+
+      <section class="panel panel-full">
+        <div class="panel-header">
+          <span class="panel-title">📋 Zone Risk Ranking</span>
+          <span class="panel-sub">Click a zone to see hourly forecast above</span>
+        </div>
+        <div id="zone-table" class="discom-table"></div>
+      </section>
+    </div><!-- /lview-zones -->
+
+    <!-- ═══════════════════ LOCAL VIEW: METER ANOMALIES ═══════════════════ -->
+    <div id="lview-meters" class="view-dashboard" style="display:none">
+      <section class="panel panel-full">
+        <div class="panel-header">
+          <span class="panel-title">🚨 Anomaly Count by Zone</span>
+          <span class="panel-sub">Flagged meters · severity stacked</span>
+        </div>
+        <div class="chart-wrap" style="height:220px"><canvas id="chart-anomaly-zone"></canvas></div>
+      </section>
+
+      <section class="panel-row">
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">🎭 Theft Archetype Mix</span>
+            <span class="panel-sub">ASTESJ classification</span>
+          </div>
+          <div class="chart-wrap" style="height:260px"><canvas id="chart-archetype"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">📈 Severity Distribution</span>
+            <span class="panel-sub">All 576 monitored meters</span>
+          </div>
+          <div class="chart-wrap" style="height:260px"><canvas id="chart-severity"></canvas></div>
+        </div>
+      </section>
+
+      <section class="panel panel-full">
+        <div class="panel-header">
+          <span class="panel-title">🔍 Top Flagged Meters</span>
+          <span class="panel-sub">Click a meter ID to open evidence packet</span>
+        </div>
+        <div id="meter-table" class="discom-table"></div>
+      </section>
+    </div><!-- /lview-meters -->
+
+    <!-- ═══════════════════ LOCAL VIEW: INSPECTOR QUEUE ═══════════════════ -->
+    <div id="lview-inspector" class="view-dashboard" style="display:none">
+      <section class="panel panel-full">
+        <div class="panel-header">
+          <span class="panel-title">📋 Inspector Queue — Top 20 Cases</span>
+          <span class="panel-sub">Ranked by anomaly score · click for evidence packet</span>
+        </div>
+        <div id="inspector-queue" class="inspector-queue"></div>
+      </section>
+    </div><!-- /lview-inspector -->
+
+    <!-- ═══════════════════ LOCAL VIEW: WHAT-IF COUNTERFACTUAL ═══════════════════ -->
+    <div id="lview-whatif" class="view-dashboard" style="display:none">
+      <section class="panel panel-full">
+        <div class="panel-header">
+          <span class="panel-title">🔮 What-If Scenario Simulator</span>
+          <span class="panel-sub">Counterfactual demand & theft projection · pre-computed grid · instant interpolation</span>
+        </div>
+        <div class="whatif-controls">
+          <div class="whatif-slider">
+            <label>Heatwave (+°C above baseline): <span id="whatif-heat-val">0</span></label>
+            <input type="range" id="whatif-heat" min="0" max="8" step="2" value="0">
+          </div>
+          <div class="whatif-slider">
+            <label>AC penetration delta: <span id="whatif-ac-val">0%</span></label>
+            <input type="range" id="whatif-ac" min="-20" max="30" step="10" value="0">
+          </div>
+          <div class="whatif-toggle">
+            <label><input type="checkbox" id="whatif-festival"> Festival / weekend boost</label>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel-row">
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">⚡ Re-projected Zone Peak Load</span>
+            <span class="panel-sub">MW · scenario-adjusted</span>
+          </div>
+          <div class="chart-wrap" style="height:260px"><canvas id="chart-whatif-peak"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">🚨 Projected Extra Flagged Meters</span>
+            <span class="panel-sub">Heat-stress driven theft signatures</span>
+          </div>
+          <div class="chart-wrap" style="height:260px"><canvas id="chart-whatif-flagged"></canvas></div>
+        </div>
+      </section>
+
+      <section class="panel panel-full" style="background:linear-gradient(135deg,#1e1b4b 0%,#0e1623 100%);border-color:#4f46e5">
+        <div class="panel-header">
+          <span class="panel-title">🤖 AI Narrative</span>
+          <span class="panel-sub">Generated by local Llama 3.1 (offline)</span>
+        </div>
+        <div class="whatif-narrative" id="whatif-narrative" style="padding:14px;color:#e0e7ff;font-size:14px;line-height:1.6">
+          Loading scenario...
+        </div>
+      </section>
+    </div><!-- /lview-whatif -->
+
+  </main><!-- /mode-local -->
+
 </div><!-- /main-grid -->
 
 <!-- Blur overlay (behind drawer, over the 10% map strip) -->
