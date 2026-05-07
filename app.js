@@ -276,8 +276,14 @@ async function fetchAndRender(key) {
         renderLocalKPIs();
         populateZoneChips();
         renderLocalSubView(STATE.localView);
-        // CRITICAL: render meter dots on the map as soon as meter data arrives
-        if (map) renderMeterMapMarkers();
+        if (map) {
+          // Refit the map now that we have real meter coordinates
+          if (key === 'meters' && !STATE._localFitted) {
+            fitMapToBengaluru();
+            STATE._localFitted = true;
+          }
+          renderMeterMapMarkers();
+        }
       }
       break;
   }
@@ -472,6 +478,30 @@ function switchViewDashboard(view) {
 const BENGALURU_CENTER = [12.9716, 77.5946];
 const INDIA_CENTER     = [22.0, 80.5];
 
+// Computes a Leaflet LatLngBounds covering all 576 meter coordinates,
+// so the default view always frames the actual data rather than guessing zoom.
+function getBengaluruBounds() {
+  const meters = STATE.data.meters || [];
+  if (!meters.length) return null;
+  const lats = meters.map(m => m.lat);
+  const lons = meters.map(m => m.lon);
+  return L.latLngBounds(
+    [Math.min(...lats), Math.min(...lons)],
+    [Math.max(...lats), Math.max(...lons)]
+  );
+}
+
+function fitMapToBengaluru() {
+  if (!map) return;
+  const b = getBengaluruBounds();
+  if (b && b.isValid()) {
+    map.fitBounds(b, { padding: [40, 40], animate: false, maxZoom: 12 });
+  } else {
+    // Fallback if meter data hasn't arrived yet
+    map.setView(BENGALURU_CENTER, 11, { animate: false });
+  }
+}
+
 function switchDashboardMode(mode) {
   STATE.dashboardMode = mode;
   try { localStorage.setItem('gridlytics_mode', mode); } catch (e) {}
@@ -496,14 +526,12 @@ function switchDashboardMode(mode) {
       if (stateLayer) map.removeLayer(stateLayer);
     }
 
-    // Step 1: apply layout (toggles fullbleed body attribute → CSS swaps map width to 100%)
     applyLocalSubView(STATE.localView);
 
-    // Step 2: AFTER layout has applied, recalc map size AND set Bengaluru view
     setTimeout(() => {
       if (map) {
         map.invalidateSize();
-        map.setView(BENGALURU_CENTER, 11, { animate: false });
+        fitMapToBengaluru();
         renderMeterMapMarkers();
       }
     }, 120);
@@ -544,14 +572,12 @@ function applyLocalSubView(view) {
     document.body.removeAttribute('data-fullbleed');
     if (tactical) tactical.style.display = 'none';
   }
-  // Force map size recalc on layout change (caller is expected to setView afterwards if needed)
   setTimeout(() => {
     if (map) {
       map.invalidateSize();
       if (STATE.dashboardMode === 'local') {
-        // Keep current center if already in Bengaluru area, else snap to it
         const z = map.getZoom();
-        if (z < 9) map.setView(BENGALURU_CENTER, 11, { animate: false });
+        if (z < 9) fitMapToBengaluru();
       }
     }
   }, 100);
@@ -2634,7 +2660,7 @@ async function boot() {
     if (map) {
       map.invalidateSize();
       if (initialMode === 'local') {
-        map.setView(BENGALURU_CENTER, 11, { animate: false });
+        fitMapToBengaluru();   // Frames whatever we have; will refit when data lands
       } else {
         map.setView(INDIA_CENTER, 5, { animate: false });
       }
