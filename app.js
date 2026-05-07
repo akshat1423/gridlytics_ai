@@ -675,6 +675,13 @@ function findMeterById(id) {
   return (STATE.data.meters || []).find(m => m.meter_id === id);
 }
 
+// Helper — render Lucide SVG icons after any dynamic HTML update
+function refreshIcons() {
+  if (window.lucide && typeof window.lucide.createIcons === 'function') {
+    try { window.lucide.createIcons(); } catch (e) { /* ignore */ }
+  }
+}
+
 // ── Detail panel (right floating) ──────────────────────────────────────────
 function updateDetailPanelForMeter(m, pinned) {
   const panel = document.getElementById('detail-panel');
@@ -732,33 +739,33 @@ function updateDetailPanelForMeter(m, pinned) {
       <span class="detail-pin ${pinClass}">${sev}</span>
     </div>
     <div class="detail-body">
-      <h4>⚡ 24H · 15-MIN CONSUMPTION</h4>
+      <h4><i data-lucide="zap"></i> 24H · 15-MIN CONSUMPTION</h4>
       <div class="detail-chart-legend">
         <span><span class="legend-dot legend-peer"></span>Peer baseline</span>
         <span><span class="legend-dot legend-obs"></span>Observed</span>
       </div>
       <canvas id="detail-ts-chart" class="detail-spark"></canvas>
 
-      <h4>📍 LOCATION</h4>
+      <h4><i data-lucide="map-pin"></i> LOCATION</h4>
       <div class="detail-row"><span>Zone</span><b>${ev.zone_name}</b></div>
       <div class="detail-row"><span>Feeder</span><b>${ev.feeder_id}</b></div>
       <div class="detail-row"><span>Category</span><b>${ev.category_label}</b></div>
 
-      <h4>⚠ THEFT INDICATORS</h4>
+      <h4><i data-lucide="alert-triangle"></i> THEFT INDICATORS</h4>
       <div class="detail-row"><span>Archetype</span><b>${ev.theft_label}</b></div>
       <div class="detail-row"><span>Anomaly score</span><b class="v-num">${ev.anomaly_score}/100</b></div>
       <div class="detail-row"><span>Confidence</span><b class="v-num">${ev.confidence_pct}%</b></div>
       <div class="detail-row"><span>Est. monthly loss</span><b class="v-num" style="color:#fbbf24">₹${(ev.est_revenue_loss_inr || 0).toLocaleString('en-IN')}</b></div>
 
-      <h4>🔬 SHAP ATTRIBUTION</h4>
+      <h4><i data-lucide="microscope"></i> SHAP ATTRIBUTION</h4>
       ${shapHtml}
 
-      <h4>🧠 CAUSAL CHAIN</h4>
+      <h4><i data-lucide="brain-circuit"></i> CAUSAL CHAIN</h4>
       <ol class="detail-causal">
         ${(ev.causal_chain || []).map(c => `<li>${c}</li>`).join('')}
       </ol>
 
-      <h4>🤖 AI BRIEF</h4>
+      <h4><i data-lucide="bot"></i> AI BRIEF</h4>
       <div class="detail-brief">
         <div class="detail-brief-label">LOCAL LLAMA 3.1 · OFFLINE</div>
         ${ev.llm_brief}
@@ -773,6 +780,8 @@ function updateDetailPanelForMeter(m, pinned) {
       <button class="detail-act-btn" onclick="clearPinned()">CLEAR</button>
     </div>
   `;
+
+  refreshIcons();
 
   // Render the 1-day (24h, 96 × 15-min) time-series chart inside the right panel
   setTimeout(() => {
@@ -823,6 +832,7 @@ function updateDetailPanelForMeter(m, pinned) {
         responsive: true,
         maintainAspectRatio: false,
         animation: { duration: 320 },
+        layout: { padding: { left: 4, right: 8, top: 6, bottom: 0 } },
         plugins: {
           legend: { display: false },
           tooltip: {
@@ -949,14 +959,14 @@ function updateDetailPanelForZone(z, pinned) {
       <span class="detail-pin ${pinClass}">${z.risk_level}</span>
     </div>
     <div class="detail-body">
-      <h4>⚡ 24H DEMAND FORECAST</h4>
+      <h4><i data-lucide="zap"></i> 24H DEMAND FORECAST</h4>
       <div class="detail-chart-legend">
         <span><span class="legend-dot legend-peer"></span>Confidence band</span>
         <span><span class="legend-dot legend-obs" style="background:#8b5cf6"></span>Predicted MW</span>
       </div>
       <canvas id="zone-ts-chart" class="detail-spark"></canvas>
 
-      <h4>📍 ZONE PROFILE</h4>
+      <h4><i data-lucide="map-pin"></i> ZONE PROFILE</h4>
       <div class="detail-row"><span>Type</span><b>${z.type.replace(/_/g, ' ')}</b></div>
       <div class="detail-row"><span>Meters monitored</span><b class="v-num">${z.n_meters}</b></div>
       <div class="detail-row"><span>Flagged</span><b class="v-num" style="color:#fca5a5">${flagged.length}</b></div>
@@ -965,21 +975,21 @@ function updateDetailPanelForZone(z, pinned) {
       <div class="detail-row"><span>AC penetration</span><b class="v-num">${(z.ac_penetration * 100).toFixed(0)}%</b></div>
       <div class="detail-row"><span>Est. monthly loss</span><b class="v-num" style="color:#fbbf24">₹${(monthlyLoss / 1000).toFixed(1)}K</b></div>
 
-      <h4>📊 SEVERITY MIX</h4>
+      <h4><i data-lucide="bar-chart-3"></i> SEVERITY MIX</h4>
       ${sevBars}
 
-      <h4>🎭 THEFT ARCHETYPES</h4>
+      <h4><i data-lucide="drama"></i> THEFT ARCHETYPES</h4>
       ${archetypeRows}
 
-      <h4>🌡️ DEMAND DRIVER ATTRIBUTION</h4>
+      <h4><i data-lucide="thermometer"></i> DEMAND DRIVER ATTRIBUTION</h4>
       ${driversBars}
 
-      <h4>🚨 TOP FLAGGED METERS IN ZONE</h4>
+      <h4><i data-lucide="siren"></i> TOP FLAGGED METERS IN ZONE</h4>
       <div class="zone-top-meters">
         ${topFlaggedHtml}
       </div>
 
-      <h4>🤖 AI BRIEF</h4>
+      <h4><i data-lucide="bot"></i> AI BRIEF</h4>
       <div class="detail-brief">
         <div class="detail-brief-label">LOCAL LLAMA 3.1 · OFFLINE</div>
         ${aiBrief}
@@ -995,6 +1005,8 @@ function updateDetailPanelForZone(z, pinned) {
         <button class="detail-act-btn" onclick="clearPinned()">CLEAR</button>
       </div>` : ''}
   `;
+
+  refreshIcons();
 
   // Render zone forecast chart
   setTimeout(() => {
@@ -1033,6 +1045,7 @@ function updateDetailPanelForZone(z, pinned) {
         responsive: true,
         maintainAspectRatio: false,
         animation: { duration: 320 },
+        layout: { padding: { left: 4, right: 8, top: 6, bottom: 0 } },
         plugins: {
           legend: { display: false },
           tooltip: {
@@ -1679,6 +1692,7 @@ function renderInspectorQueue() {
   el.querySelectorAll('.inspector-card').forEach(card => {
     card.addEventListener('click', () => openMeterEvidence(card.dataset.meterId));
   });
+  refreshIcons();
 }
 
 // ── Meter evidence drawer (opens the existing DISCOM drawer with meter content) ─
@@ -2890,6 +2904,7 @@ function renderAll() {
 // ═══════════════════════════════════════════════════════════════════════ BOOT
 
 async function boot() {
+  refreshIcons();          // Render Lucide SVGs in static markup
   bindEvents();
 
   // Apply shimmers immediately so UI isn't blank

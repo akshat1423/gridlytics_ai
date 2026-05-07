@@ -17,6 +17,9 @@
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 
+  <!-- Lucide icons (open-source SVG icon library) -->
+  <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+
   <!-- App styles -->
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -25,7 +28,7 @@
 <!-- ═══════════════════════════════════════════════════════════════ HEADER -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">⚡</span>
+    <span class="logo"><i data-lucide="zap"></i></span>
     <span class="logo-text">Gridlytics <span class="logo-accent">AI</span></span>
     <span class="logo-sub">Energy P&L Intelligence · India</span>
   </div>
@@ -33,17 +36,17 @@
   <div class="header-center">
     <!-- INDIA sub-view toggle (visible only in India mode) -->
     <div class="map-view-toggle" id="map-view-toggle" style="display:none">
-      <button class="toggle-btn" data-view="tampering">⚡ Tampering</button>
-      <button class="toggle-btn" data-view="htls">🔌 Wire Loss</button>
-      <button class="toggle-btn active" data-view="sm">📟 Smart Meter</button>
+      <button class="toggle-btn" data-view="tampering"><i data-lucide="zap"></i> Tampering</button>
+      <button class="toggle-btn" data-view="htls"><i data-lucide="cable"></i> Wire Loss</button>
+      <button class="toggle-btn active" data-view="sm"><i data-lucide="cpu"></i> Smart Meter</button>
     </div>
 
     <!-- LOCAL sub-view toggle (visible only in Local mode) -->
     <div class="map-view-toggle local-view-toggle" id="local-view-toggle">
-      <button class="toggle-btn active" data-local-view="meters">🚨 Meter Anomalies</button>
-      <button class="toggle-btn" data-local-view="zones">📊 Zone Forecast</button>
-      <button class="toggle-btn" data-local-view="inspector">📋 Inspector Queue</button>
-      <button class="toggle-btn" data-local-view="whatif">🔮 What-If</button>
+      <button class="toggle-btn active" data-local-view="meters"><i data-lucide="siren"></i> Meter Anomalies</button>
+      <button class="toggle-btn" data-local-view="zones"><i data-lucide="bar-chart-3"></i> Zone Forecast</button>
+      <button class="toggle-btn" data-local-view="inspector"><i data-lucide="clipboard-list"></i> Inspector Queue</button>
+      <button class="toggle-btn" data-local-view="whatif"><i data-lucide="sparkles"></i> What-If</button>
     </div>
   </div>
 
@@ -53,8 +56,8 @@
     </span>
     <!-- INDIA / LOCAL MODE TOGGLE (right corner, replaces Streamlit) -->
     <div class="mode-toggle" id="mode-toggle">
-      <button class="mode-btn" data-mode="india">🇮🇳 India</button>
-      <button class="mode-btn active" data-mode="local">📍 Local</button>
+      <button class="mode-btn" data-mode="india"><i data-lucide="globe-2"></i> India</button>
+      <button class="mode-btn active" data-mode="local"><i data-lucide="map-pin"></i> Local</button>
     </div>
     <button class="refresh-btn" id="refresh-btn" title="Refresh all data">↺</button>
     <span class="timestamp" id="last-updated">–</span>
@@ -434,8 +437,8 @@
     <div class="overlay-section">
       <div class="overlay-section-title">DENSITY</div>
       <div class="density-toggle">
-        <button class="density-btn active" data-density="meter">📍 Meter Level</button>
-        <button class="density-btn" data-density="zone">🌐 Zone Level</button>
+        <button class="density-btn active" data-density="meter"><i data-lucide="map-pin"></i> Meter Level</button>
+        <button class="density-btn" data-density="zone"><i data-lucide="hexagon"></i> Zone Level</button>
       </div>
     </div>
 
@@ -474,9 +477,9 @@
 
     <div class="overlay-section">
       <div class="overlay-section-title">SCENES</div>
-      <div class="scene-row" id="scene-bengaluru" data-scene="bengaluru">📍 Bengaluru wide</div>
-      <div class="scene-row" id="scene-flagged" data-scene="flagged">🚨 Flagged meters only</div>
-      <div class="scene-row" id="scene-rural" data-scene="rural">🌾 Peri-urban (Yelahanka, Hebbal, Peenya)</div>
+      <div class="scene-row" data-scene="bengaluru"><i data-lucide="map-pin"></i> Bengaluru wide</div>
+      <div class="scene-row" data-scene="flagged"><i data-lucide="siren"></i> Flagged meters only</div>
+      <div class="scene-row" data-scene="rural"><i data-lucide="trees"></i> Peri-urban (Yelahanka, Hebbal, Peenya)</div>
     </div>
   </aside>
 
@@ -484,7 +487,7 @@
   <aside class="overlay-right" id="overlay-right">
     <div class="detail-panel" id="detail-panel">
       <div class="detail-empty">
-        <div class="detail-empty-icon">📡</div>
+        <div class="detail-empty-icon"><i data-lucide="radar" style="width:36px;height:36px"></i></div>
         <div class="detail-empty-text">Hover or click a meter to inspect</div>
       </div>
     </div>

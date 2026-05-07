@@ -996,6 +996,37 @@ body[data-fullbleed="1"] #tactical-overlay {
   font-family: 'Inter', system-ui, sans-serif;
 }
 
+/* ─── Lucide SVG icons — inline alignment + sizing ─── */
+[data-lucide], svg.lucide {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  vertical-align: -2px;
+  stroke-width: 2;
+  flex-shrink: 0;
+}
+.toggle-btn [data-lucide], .toggle-btn svg.lucide,
+.mode-btn [data-lucide],   .mode-btn svg.lucide,
+.density-btn [data-lucide],.density-btn svg.lucide {
+  width: 12px; height: 12px; margin-right: 5px;
+}
+.scene-row [data-lucide], .scene-row svg.lucide {
+  width: 12px; height: 12px; margin-right: 6px; vertical-align: -1px;
+}
+.logo [data-lucide], .logo svg.lucide {
+  width: 22px; height: 22px; color: var(--amber); vertical-align: -4px;
+}
+.detail-empty-icon [data-lucide], .detail-empty-icon svg.lucide {
+  width: 36px; height: 36px; opacity: 0.4;
+}
+.detail-body h4 [data-lucide], .detail-body h4 svg.lucide,
+.overlay-section-title [data-lucide], .overlay-section-title svg.lucide {
+  width: 11px; height: 11px; margin-right: 5px; vertical-align: -1px;
+}
+.detail-row [data-lucide], .detail-row svg.lucide {
+  width: 11px; height: 11px;
+}
+
 /* Floating "← All zones" button shown only when drilled into a zone */
 .zone-back-btn {
   position: absolute;
