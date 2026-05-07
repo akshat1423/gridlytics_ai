@@ -870,6 +870,19 @@ function updateDetailPanelForZone(z, pinned) {
   const panel = document.getElementById('detail-panel');
   if (!panel || !z) return;
 
+  const pinClass = z.risk_level === 'Critical' ? 'pin-critical' : z.risk_level === 'High' ? 'pin-high' : z.risk_level === 'Moderate' ? 'pin-moderate' : 'pin-low';
+
+  // Zone meters + computed sub-metrics
+  const zoneMeters = (STATE.data.meters || []).filter(m => m.zone_id === z.zone_id);
+  const flagged = zoneMeters.filter(m => m.is_theft);
+  const sev = { Critical: 0, High: 0, Moderate: 0, Low: 0 };
+  zoneMeters.forEach(m => sev[m.severity] = (sev[m.severity] || 0) + 1);
+  const archCount = {};
+  flagged.forEach(m => { if (m.theft_label) archCount[m.theft_label] = (archCount[m.theft_label] || 0) + 1; });
+  const topFlagged = [...flagged].sort((a, b) => b.anomaly_score - a.anomaly_score).slice(0, 3);
+  const monthlyLoss = flagged.reduce((s, m) => s + (m.est_revenue_loss_inr || 0), 0);
+
+  // Driver bars
   const driversBars = Object.entries(z.drivers || {}).map(([k, v]) => `
     <div class="detail-bar">
       <span class="detail-bar-label">${k.replace(/_/g, ' ')}</span>
@@ -878,7 +891,57 @@ function updateDetailPanelForZone(z, pinned) {
     </div>
   `).join('');
 
-  const pinClass = z.risk_level === 'Critical' ? 'pin-critical' : z.risk_level === 'High' ? 'pin-high' : z.risk_level === 'Moderate' ? 'pin-moderate' : 'pin-low';
+  // Severity bars (analog of SHAP attribution)
+  const sevColors = { Critical: '#ef4444', High: '#f97316', Moderate: '#f59e0b', Low: '#10b981' };
+  const sevTotal = Math.max(1, zoneMeters.length);
+  const sevBars = ['Critical', 'High', 'Moderate', 'Low'].map(level => {
+    const count = sev[level] || 0;
+    const pct = (count / sevTotal) * 100;
+    return `
+      <div class="detail-bar">
+        <span class="detail-bar-label" style="color:${sevColors[level]}">● ${level}</span>
+        <div class="detail-bar-track"><div class="detail-bar-fill" style="width:${pct}%; background:${sevColors[level]}"></div></div>
+        <span class="detail-bar-val">${count}</span>
+      </div>`;
+  }).join('');
+
+  // Archetype mix (analog of theft indicators detail)
+  const archetypeRows = Object.entries(archCount).map(([label, count]) => `
+    <div class="detail-row"><span>${label}</span><b class="v-num">${count} cases</b></div>
+  `).join('') || '<div class="detail-row" style="opacity:0.55"><span>No theft signatures detected</span></div>';
+
+  // Top flagged meters in zone (clickable, analog of "recommended next case")
+  const topFlaggedHtml = topFlagged.length ? topFlagged.map(m => `
+    <div class="zone-top-meter" onclick="openMeterFromZone('${m.meter_id}')">
+      <div class="zone-tm-id">${m.meter_id}</div>
+      <div class="zone-tm-meta">
+        <span class="zone-tm-arch">${m.theft_label}</span>
+        <span class="zone-tm-score" style="color:${sevColors[m.severity]}">${m.anomaly_score}</span>
+      </div>
+    </div>
+  `).join('') : '<div style="opacity:0.55;font-size:11px;padding:6px 0">No flagged meters in this zone.</div>';
+
+  // 24h forecast sparkline (analog of meter's 24h chart)
+  const hourly = z.hourly_forecast || [];
+  const hourlyData = hourly.map(h => h.predicted_mw);
+  const hourlyHi   = hourly.map(h => h.confidence_high);
+  const hourlyLo   = hourly.map(h => h.confidence_low);
+  const hourLabels = hourly.map(h => h.hour % 6 === 0 ? `${String(h.hour).padStart(2,'0')}:00` : '');
+
+  // Auto-generated AI brief (template — would be Llama-generated in production)
+  const topDriver = Object.entries(z.drivers || {}).sort((a, b) => b[1] - a[1])[0];
+  const driverPct = topDriver ? Math.round(topDriver[1] * 100) : 0;
+  const driverName = topDriver ? topDriver[0].replace(/_/g, ' ') : 'mixed factors';
+  const aiBrief = `${z.zone_name} (${z.type.replace(/_/g, ' ')}) operates at ${z.atc_pct}% AT&C with ${flagged.length}/${z.n_meters} meters flagged. Demand peaks at ${z.peak_mw} MW around ${z.peak_hour}:00, driven ${driverPct}% by ${driverName}. ${sev.Critical > 0 ? `Critical severity in ${sev.Critical} meter${sev.Critical > 1 ? 's' : ''} — ` : ''}${flagged.length > 0 ? `dominant archetype is ${Object.entries(archCount).sort((a,b)=>b[1]-a[1])[0]?.[0] || 'mixed'}.` : 'no theft signatures detected.'} Estimated monthly loss: ₹${(monthlyLoss / 1000).toFixed(1)}K.`;
+
+  // Zone-level recommended action
+  const action = sev.Critical > 2
+    ? `Deploy mobile inspection unit — ${sev.Critical} critical cases concentrated in this zone`
+    : sev.Critical > 0
+      ? `Inspect top ${Math.min(3, flagged.length)} flagged meters; verify feeder mass-balance`
+      : flagged.length > 0
+        ? `Routine spot-check on ${flagged.length} suspect meters`
+        : 'No action required — zone within normal envelope';
 
   panel.innerHTML = `
     <div class="detail-head">
@@ -886,26 +949,134 @@ function updateDetailPanelForZone(z, pinned) {
       <span class="detail-pin ${pinClass}">${z.risk_level}</span>
     </div>
     <div class="detail-body">
-      <h4>📊 ZONE METRICS</h4>
+      <h4>⚡ 24H DEMAND FORECAST</h4>
+      <div class="detail-chart-legend">
+        <span><span class="legend-dot legend-peer"></span>Confidence band</span>
+        <span><span class="legend-dot legend-obs" style="background:#8b5cf6"></span>Predicted MW</span>
+      </div>
+      <canvas id="zone-ts-chart" class="detail-spark"></canvas>
+
+      <h4>📍 ZONE PROFILE</h4>
       <div class="detail-row"><span>Type</span><b>${z.type.replace(/_/g, ' ')}</b></div>
       <div class="detail-row"><span>Meters monitored</span><b class="v-num">${z.n_meters}</b></div>
-      <div class="detail-row"><span>Flagged</span><b class="v-num" style="color:#fca5a5">${z.n_flagged}</b></div>
-
-      <h4>⚡ FORECAST (next 24h)</h4>
-      <div class="detail-row"><span>Peak load</span><b class="v-num">${z.peak_mw} MW @ ${z.peak_hour}:00</b></div>
+      <div class="detail-row"><span>Flagged</span><b class="v-num" style="color:#fca5a5">${flagged.length}</b></div>
       <div class="detail-row"><span>Avg load</span><b class="v-num">${z.avg_mw} MW</b></div>
       <div class="detail-row"><span>AT&C loss</span><b class="v-num">${z.atc_pct}%</b></div>
       <div class="detail-row"><span>AC penetration</span><b class="v-num">${(z.ac_penetration * 100).toFixed(0)}%</b></div>
+      <div class="detail-row"><span>Est. monthly loss</span><b class="v-num" style="color:#fbbf24">₹${(monthlyLoss / 1000).toFixed(1)}K</b></div>
 
-      <h4>🌡️ DRIVER ATTRIBUTION</h4>
+      <h4>📊 SEVERITY MIX</h4>
+      ${sevBars}
+
+      <h4>🎭 THEFT ARCHETYPES</h4>
+      ${archetypeRows}
+
+      <h4>🌡️ DEMAND DRIVER ATTRIBUTION</h4>
       ${driversBars}
+
+      <h4>🚨 TOP FLAGGED METERS IN ZONE</h4>
+      <div class="zone-top-meters">
+        ${topFlaggedHtml}
+      </div>
+
+      <h4>🤖 AI BRIEF</h4>
+      <div class="detail-brief">
+        <div class="detail-brief-label">LOCAL LLAMA 3.1 · OFFLINE</div>
+        ${aiBrief}
+      </div>
+
+      <div class="detail-action">
+        <b>RECOMMENDED:</b> ${action}
+      </div>
     </div>
     ${STATE.localView === 'meters' && STATE.density === 'zone' ? `
       <div class="detail-actions-row">
         <button class="detail-act-btn primary" onclick="drillIntoZone('${z.zone_id}')">DRILL INTO METERS</button>
+        <button class="detail-act-btn" onclick="clearPinned()">CLEAR</button>
       </div>` : ''}
   `;
+
+  // Render zone forecast chart
+  setTimeout(() => {
+    const ctx = document.getElementById('zone-ts-chart');
+    if (!ctx || !hourly.length) return;
+    if (charts.zoneDetailTs) charts.zoneDetailTs.destroy();
+    charts.zoneDetailTs = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: hourLabels,
+        datasets: [
+          {
+            label: 'Confidence high',
+            data: hourlyHi,
+            borderColor: 'rgba(139,92,246,0.0)',
+            backgroundColor: 'rgba(139,92,246,0.18)',
+            fill: '+1', pointRadius: 0, tension: 0.35,
+          },
+          {
+            label: 'Confidence low',
+            data: hourlyLo,
+            borderColor: 'rgba(139,92,246,0.0)',
+            backgroundColor: 'rgba(139,92,246,0.18)',
+            fill: false, pointRadius: 0, tension: 0.35,
+          },
+          {
+            label: 'Predicted MW',
+            data: hourlyData,
+            borderColor: '#8b5cf6',
+            backgroundColor: 'rgba(139,92,246,0.10)',
+            borderWidth: 1.6, pointRadius: 0, tension: 0.35, fill: false,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 320 },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            mode: 'index',
+            intersect: false,
+            filter: (item) => item.dataset.label === 'Predicted MW',
+            callbacks: {
+              title: (items) => items.length ? `${String(items[0].dataIndex).padStart(2,'0')}:00` : '',
+              label: (c) => `${c.raw} MW`,
+            },
+          },
+        },
+        scales: {
+          x: {
+            ticks: {
+              color: '#64748b',
+              font: { size: 9 },
+              autoSkip: false,
+              maxRotation: 0,
+              callback: function(val) { const lbl = this.getLabelForValue(val); return lbl || ''; },
+            },
+            grid: { color: 'rgba(30,45,66,0.4)', drawTicks: false },
+          },
+          y: {
+            ticks: {
+              color: '#64748b',
+              font: { size: 9 },
+              callback: v => `${v} MW`,
+              maxTicksLimit: 4,
+            },
+            grid: { color: 'rgba(30,45,66,0.3)' },
+          },
+        },
+      },
+    });
+  }, 30);
 }
+
+window.openMeterFromZone = function(meterId) {
+  const m = (STATE.data.meters || []).find(mm => mm.meter_id === meterId);
+  if (!m) return;
+  STATE.pinnedMeter = meterId;
+  updateDetailPanelForMeter(m, true);
+};
 
 window.dispatchInspection = function(meterId) {
   alert(`Inspection dispatched for ${meterId}.\n\n(Demo: in production, this triggers field-team workflow + audit log.)`);
