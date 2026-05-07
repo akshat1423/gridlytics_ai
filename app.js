@@ -697,7 +697,7 @@ function updateDetailPanelForMeter(m, pinned) {
       <span class="detail-pin ${pinClass}">${sev}</span>
     </div>
     <div class="detail-body">
-      <h4>⚡ 7-DAY 15-MIN CONSUMPTION</h4>
+      <h4>⚡ 24H · 15-MIN CONSUMPTION</h4>
       <div class="detail-chart-legend">
         <span><span class="legend-dot legend-peer"></span>Peer baseline</span>
         <span><span class="legend-dot legend-obs"></span>Observed</span>
@@ -739,13 +739,24 @@ function updateDetailPanelForMeter(m, pinned) {
     </div>
   `;
 
-  // Render the 7-day time-series chart inside the right panel
+  // Render the 1-day (24h, 96 × 15-min) time-series chart inside the right panel
   setTimeout(() => {
     const ctx = document.getElementById('detail-ts-chart');
     if (!ctx || !ev.observed_kw_15min || !ev.peer_baseline_kw_15min) return;
     if (charts.detailTs) charts.detailTs.destroy();
-    const N = ev.observed_kw_15min.length;
-    const labels = Array.from({ length: N }, (_, i) => i % 96 === 0 ? `D${Math.floor(i/96) + 1}` : '');
+
+    // Slice to the last day only (last 96 intervals = 24h × 4)
+    const peer = ev.peer_baseline_kw_15min.slice(-96);
+    const obs  = ev.observed_kw_15min.slice(-96);
+    // Hour labels at 00:00 / 06:00 / 12:00 / 18:00 / 23:45
+    const labels = Array.from({ length: 96 }, (_, i) => {
+      if (i % 24 === 0) {
+        const h = Math.floor(i / 4);
+        return `${String(h).padStart(2,'0')}:00`;
+      }
+      return '';
+    });
+
     charts.detailTs = new Chart(ctx, {
       type: 'line',
       data: {
@@ -753,22 +764,22 @@ function updateDetailPanelForMeter(m, pinned) {
         datasets: [
           {
             label: 'Peer baseline',
-            data: ev.peer_baseline_kw_15min,
+            data: peer,
             borderColor: '#10b981',
             backgroundColor: 'rgba(16,185,129,0.08)',
-            borderWidth: 1.2,
+            borderWidth: 1.4,
             pointRadius: 0,
-            tension: 0.2,
+            tension: 0.3,
             fill: false,
           },
           {
             label: 'Observed',
-            data: ev.observed_kw_15min,
+            data: obs,
             borderColor: '#ef4444',
-            backgroundColor: 'rgba(239,68,68,0.10)',
-            borderWidth: 1.4,
+            backgroundColor: 'rgba(239,68,68,0.12)',
+            borderWidth: 1.6,
             pointRadius: 0,
-            tension: 0.2,
+            tension: 0.3,
             fill: false,
           },
         ],
@@ -776,14 +787,20 @@ function updateDetailPanelForMeter(m, pinned) {
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        animation: { duration: 350 },
+        animation: { duration: 320 },
         plugins: {
           legend: { display: false },
           tooltip: {
             mode: 'index',
             intersect: false,
             callbacks: {
-              title: (items) => items.length ? `Day ${Math.floor(items[0].dataIndex / 96) + 1} · ${String(Math.floor((items[0].dataIndex % 96) / 4)).padStart(2,'0')}:${String((items[0].dataIndex % 4) * 15).padStart(2,'0')}` : '',
+              title: (items) => {
+                if (!items.length) return '';
+                const i = items[0].dataIndex;
+                const h = Math.floor(i / 4);
+                const mm = (i % 4) * 15;
+                return `${String(h).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
+              },
               label: (c) => `${c.dataset.label}: ${c.raw.toFixed(2)} kW`,
             },
           },
@@ -792,7 +809,7 @@ function updateDetailPanelForMeter(m, pinned) {
           x: {
             ticks: {
               color: '#64748b',
-              font: { size: 8 },
+              font: { size: 9 },
               autoSkip: false,
               maxRotation: 0,
               callback: function(val) { const lbl = this.getLabelForValue(val); return lbl || ''; },
