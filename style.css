@@ -992,8 +992,17 @@ body[data-fullbleed="1"] #tactical-overlay {
   right: 0;
   bottom: 0;
   pointer-events: none;
-  z-index: 40;
+  z-index: 1100;                       /* above Leaflet controls (1000) */
   font-family: 'Inter', system-ui, sans-serif;
+}
+
+/* In fullbleed mode: move Leaflet zoom controls to bottom-right (away from left toolbar) */
+body[data-fullbleed="1"] .leaflet-top.leaflet-left { display: none !important; }
+body[data-fullbleed="1"] .leaflet-control-zoom {
+  position: absolute;
+  right: 396px;       /* sits left of detail panel */
+  bottom: 110px;      /* sits above bottom KPI strip */
+  z-index: 900;
 }
 .tactical-overlay > * { pointer-events: auto; }
 

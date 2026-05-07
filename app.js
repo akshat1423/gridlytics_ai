@@ -255,13 +255,12 @@ async function fetchAndRender(key) {
     case 'intelligence':
       renderKPIs();
       renderDiscomTable();
-      if (map) renderMapMarkers();
+      // Only render DISCOM markers in India mode — Local mode uses meter dots instead
+      if (map && STATE.dashboardMode === 'india') renderMapMarkers();
       document.getElementById('map-loading').classList.add('hidden');
-      // Reset lazy-render flags so views re-render with fresh data
       STATE._tamperingRendered = false;
       STATE._htlsRendered = false;
       STATE._smRendered = false;
-      // Render whichever view is currently active
       switchViewDashboard(STATE.mapView);
       break;
     case 'meters':
@@ -269,15 +268,16 @@ async function fetchAndRender(key) {
     case 'zoneForecast':
     case 'evidence':
     case 'whatif':
-      // Reset local lazy-render flags
       STATE._localZonesRendered = false;
       STATE._localMetersRendered = false;
       STATE._localInspectorRendered = false;
       STATE._localWhatifRendered = false;
-      // If user is already in Local mode, refresh the active sub-view
       if (STATE.dashboardMode === 'local') {
         renderLocalKPIs();
+        populateZoneChips();
         renderLocalSubView(STATE.localView);
+        // CRITICAL: render meter dots on the map as soon as meter data arrives
+        if (map) renderMeterMapMarkers();
       }
       break;
   }
@@ -491,19 +491,26 @@ function switchDashboardMode(mode) {
     if (mlStrip) mlStrip.style.display = 'none';
     if (logoSub) logoSub.textContent = 'Smart Meter Intelligence · Bengaluru';
 
-    // Fly map to Bengaluru
     if (map) {
-      map.flyTo(BENGALURU_CENTER, 11, { duration: 0.7 });
       if (markerLayer) markerLayer.clearLayers();
       if (stateLayer) map.removeLayer(stateLayer);
     }
 
-    // Apply current sub-view (which sets fullbleed if meters)
+    // Step 1: apply layout (toggles fullbleed body attribute → CSS swaps map width to 100%)
     applyLocalSubView(STATE.localView);
+
+    // Step 2: AFTER layout has applied, recalc map size AND set Bengaluru view
+    setTimeout(() => {
+      if (map) {
+        map.invalidateSize();
+        map.setView(BENGALURU_CENTER, 11, { animate: false });
+        renderMeterMapMarkers();
+      }
+    }, 120);
+
     renderLocalKPIs();
     renderLocalSubView(STATE.localView);
     populateZoneChips();
-    renderMeterMapMarkers();
   } else {
     if (indiaPanel) indiaPanel.style.display = '';
     if (localPanel) localPanel.style.display = 'none';
@@ -512,16 +519,18 @@ function switchDashboardMode(mode) {
     if (mlStrip && STATE.data.models.length) mlStrip.style.display = '';
     if (logoSub) logoSub.textContent = 'Energy P&L Intelligence · India';
 
-    // Drop fullbleed attr
     document.body.removeAttribute('data-fullbleed');
     const tactical = document.getElementById('tactical-overlay');
     if (tactical) tactical.style.display = 'none';
 
-    if (map) {
-      map.flyTo(INDIA_CENTER, 5, { duration: 0.7 });
-      if (stateLayer && !map.hasLayer(stateLayer)) map.addLayer(stateLayer);
-      renderMapMarkers();
-    }
+    setTimeout(() => {
+      if (map) {
+        map.invalidateSize();
+        map.setView(INDIA_CENTER, 5, { animate: false });
+        if (stateLayer && !map.hasLayer(stateLayer)) map.addLayer(stateLayer);
+        renderMapMarkers();
+      }
+    }, 120);
   }
 }
 
@@ -535,8 +544,17 @@ function applyLocalSubView(view) {
     document.body.removeAttribute('data-fullbleed');
     if (tactical) tactical.style.display = 'none';
   }
-  // Force map size recalc on layout change
-  setTimeout(() => { if (map) map.invalidateSize(); }, 60);
+  // Force map size recalc on layout change (caller is expected to setView afterwards if needed)
+  setTimeout(() => {
+    if (map) {
+      map.invalidateSize();
+      if (STATE.dashboardMode === 'local') {
+        // Keep current center if already in Bengaluru area, else snap to it
+        const z = map.getZoom();
+        if (z < 9) map.setView(BENGALURU_CENTER, 11, { animate: false });
+      }
+    }
+  }, 100);
 }
 
 function switchLocalView(view) {
@@ -2511,7 +2529,19 @@ async function boot() {
 
   // Wait for map to be ready (usually done by now), then invalidate size
   await mapPromise;
-  setTimeout(() => { if (map) { map.invalidateSize(); map.setView([22.0, 80.5], 5); } }, 200);
+  // Compute the initial view based on saved mode (avoids a flash of India zoom 5 before flying to Bengaluru)
+  let initialMode = 'local';
+  try { initialMode = localStorage.getItem('gridlytics_mode') || 'local'; } catch (e) {}
+  setTimeout(() => {
+    if (map) {
+      map.invalidateSize();
+      if (initialMode === 'local') {
+        map.setView(BENGALURU_CENTER, 11, { animate: false });
+      } else {
+        map.setView(INDIA_CENTER, 5, { animate: false });
+      }
+    }
+  }, 200);
 
   // Safety net: hide map spinner after 12s no matter what (cold warehouse can be slow)
   setTimeout(() => document.getElementById('map-loading').classList.add('hidden'), 12000);
