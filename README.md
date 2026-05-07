@@ -1,6 +1,6 @@
 # Gridlytics
 
-Smart Meter Intelligence & Loss Detection Platform — mock-based demo for BESCOM (Theme 8)
+Smart Meter Intelligence & Loss Detection Platform — mock-based demo for BESCOM (Theme 8).
 
 **Live demo:** https://gridlytics.vercel.app
 
