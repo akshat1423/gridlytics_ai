@@ -1329,7 +1329,22 @@ body[data-fullbleed="1"] .leaflet-control-zoom {
 }
 .detail-action b { color: #fff; }
 
-.detail-spark { width: 100%; height: 80px; margin-top: 6px; }
+.detail-spark { width: 100% !important; height: 130px !important; margin-top: 4px; display: block; }
+.detail-chart-legend {
+  display: flex;
+  gap: 14px;
+  font-size: 9px;
+  color: #94a3b8;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+  align-items: center;
+}
+.detail-chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend-dot {
+  width: 10px; height: 2px; border-radius: 1px; display: inline-block;
+}
+.legend-dot.legend-peer { background: #10b981; box-shadow: 0 0 4px rgba(16,185,129,0.6); }
+.legend-dot.legend-obs  { background: #ef4444; box-shadow: 0 0 4px rgba(239,68,68,0.6); }
 
 .detail-zone-card {
   padding: 14px 16px;

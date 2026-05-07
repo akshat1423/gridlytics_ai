@@ -697,6 +697,13 @@ function updateDetailPanelForMeter(m, pinned) {
       <span class="detail-pin ${pinClass}">${sev}</span>
     </div>
     <div class="detail-body">
+      <h4>⚡ 7-DAY 15-MIN CONSUMPTION</h4>
+      <div class="detail-chart-legend">
+        <span><span class="legend-dot legend-peer"></span>Peer baseline</span>
+        <span><span class="legend-dot legend-obs"></span>Observed</span>
+      </div>
+      <canvas id="detail-ts-chart" class="detail-spark"></canvas>
+
       <h4>📍 LOCATION</h4>
       <div class="detail-row"><span>Zone</span><b>${ev.zone_name}</b></div>
       <div class="detail-row"><span>Feeder</span><b>${ev.feeder_id}</b></div>
@@ -731,6 +738,80 @@ function updateDetailPanelForMeter(m, pinned) {
       <button class="detail-act-btn" onclick="clearPinned()">CLEAR</button>
     </div>
   `;
+
+  // Render the 7-day time-series chart inside the right panel
+  setTimeout(() => {
+    const ctx = document.getElementById('detail-ts-chart');
+    if (!ctx || !ev.observed_kw_15min || !ev.peer_baseline_kw_15min) return;
+    if (charts.detailTs) charts.detailTs.destroy();
+    const N = ev.observed_kw_15min.length;
+    const labels = Array.from({ length: N }, (_, i) => i % 96 === 0 ? `D${Math.floor(i/96) + 1}` : '');
+    charts.detailTs = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'Peer baseline',
+            data: ev.peer_baseline_kw_15min,
+            borderColor: '#10b981',
+            backgroundColor: 'rgba(16,185,129,0.08)',
+            borderWidth: 1.2,
+            pointRadius: 0,
+            tension: 0.2,
+            fill: false,
+          },
+          {
+            label: 'Observed',
+            data: ev.observed_kw_15min,
+            borderColor: '#ef4444',
+            backgroundColor: 'rgba(239,68,68,0.10)',
+            borderWidth: 1.4,
+            pointRadius: 0,
+            tension: 0.2,
+            fill: false,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 350 },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            mode: 'index',
+            intersect: false,
+            callbacks: {
+              title: (items) => items.length ? `Day ${Math.floor(items[0].dataIndex / 96) + 1} · ${String(Math.floor((items[0].dataIndex % 96) / 4)).padStart(2,'0')}:${String((items[0].dataIndex % 4) * 15).padStart(2,'0')}` : '',
+              label: (c) => `${c.dataset.label}: ${c.raw.toFixed(2)} kW`,
+            },
+          },
+        },
+        scales: {
+          x: {
+            ticks: {
+              color: '#64748b',
+              font: { size: 8 },
+              autoSkip: false,
+              maxRotation: 0,
+              callback: function(val) { const lbl = this.getLabelForValue(val); return lbl || ''; },
+            },
+            grid: { color: 'rgba(30,45,66,0.4)', drawTicks: false },
+          },
+          y: {
+            ticks: {
+              color: '#64748b',
+              font: { size: 9 },
+              callback: v => `${v} kW`,
+              maxTicksLimit: 4,
+            },
+            grid: { color: 'rgba(30,45,66,0.3)' },
+          },
+        },
+      },
+    });
+  }, 30);
 }
 
 function updateDetailPanelForZone(z, pinned) {
