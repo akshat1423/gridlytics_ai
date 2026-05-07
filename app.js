@@ -287,14 +287,12 @@ async function fetchAndRender(key) {
         renderLocalKPIs();
         populateZoneChips();
         renderLocalSubView(STATE.localView);
-        if (map) {
-          // Refit the map now that we have real meter coordinates
-          if (key === 'meters' && !STATE._localFitted) {
-            fitMapToBengaluru();
-            STATE._localFitted = true;
-          }
-          renderMeterMapMarkers();
+        // Local mode uses MapLibre — no Leaflet `map` gate; render whenever data arrives
+        if (key === 'meters' && !STATE._localFitted) {
+          fitMapToBengaluru();
+          STATE._localFitted = true;
         }
+        renderMeterMapMarkers();
       }
       break;
   }
@@ -830,12 +828,32 @@ function getBengaluruBounds() {
 }
 
 function fitMapToBengaluru() {
+  // Local (MapLibre) — fit to the actual meter bounds with a tasteful zoom + 3D pitch
+  if (STATE.dashboardMode === 'local' && mlMap) {
+    const meters = STATE.data.meters || [];
+    if (meters.length) {
+      const lats = meters.map(m => m.lat);
+      const lons = meters.map(m => m.lon);
+      const sw = [Math.min(...lons), Math.min(...lats)];
+      const ne = [Math.max(...lons), Math.max(...lats)];
+      mlMap.fitBounds([sw, ne], {
+        padding: { top: 80, right: 400, bottom: 110, left: 300 },  // leave room for floating panels
+        maxZoom: 12.2,
+        pitch: 55,
+        bearing: -12,
+        animate: false,
+      });
+    } else {
+      mlMap.jumpTo({ center: [BENGALURU_CENTER[1], BENGALURU_CENTER[0]], zoom: 11.5, pitch: 55, bearing: -12 });
+    }
+    return;
+  }
+  // India (Leaflet)
   if (!map) return;
   const b = getBengaluruBounds();
   if (b && b.isValid()) {
     map.fitBounds(b, { padding: [40, 40], animate: false, maxZoom: 12 });
   } else {
-    // Fallback if meter data hasn't arrived yet
     map.setView(BENGALURU_CENTER, 11, { animate: false });
   }
 }
@@ -2010,28 +2028,172 @@ function renderMeterAnomalyView() {
 }
 
 // ── SUB-VIEW 3: Inspector Queue ────────────────────────────────────────────
+const _queueState = { search: '', severity: 'all', archetype: 'all' };
+
 function renderInspectorQueue() {
   const evidence = STATE.data.evidence || [];
   const el = document.getElementById('inspector-queue');
   if (!el || !evidence.length) return;
 
-  el.innerHTML = evidence.map((e, i) => `
-    <div class="inspector-card severity-${e.severity}" data-meter-id="${e.meter_id}">
-      <div class="inspector-card-head">
-        <span class="inspector-card-id">#${(i+1).toString().padStart(2,'0')} · ${e.meter_id}</span>
-        <span class="inspector-card-arch">${e.theft_label}</span>
+  const sevCount = { Critical: 0, High: 0, Moderate: 0 };
+  const archCount = {};
+  evidence.forEach(e => {
+    sevCount[e.severity] = (sevCount[e.severity] || 0) + 1;
+    archCount[e.theft_label] = (archCount[e.theft_label] || 0) + 1;
+  });
+  const totalLoss = evidence.reduce((s, e) => s + (e.est_revenue_loss_inr || 0), 0);
+  const archetypes = Object.keys(archCount).sort();
+
+  // Apply filter
+  const filtered = evidence.filter(e => {
+    if (_queueState.severity !== 'all' && e.severity !== _queueState.severity) return false;
+    if (_queueState.archetype !== 'all' && e.theft_label !== _queueState.archetype) return false;
+    if (_queueState.search) {
+      const q = _queueState.search.toLowerCase();
+      if (!e.meter_id.toLowerCase().includes(q) &&
+          !e.zone_name.toLowerCase().includes(q) &&
+          !e.feeder_id.toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
+
+  // ── Header (summary + search + filter chips) ─────────────────────────
+  const headerHtml = `
+    <div class="iq-header">
+      <div class="iq-summary">
+        <div class="iq-stat">
+          <div class="iq-stat-num">${evidence.length}</div>
+          <div class="iq-stat-label">Open cases</div>
+        </div>
+        <div class="iq-stat-sev">
+          <span class="iq-pill iq-pill-critical"><span class="iq-pill-dot"></span>${sevCount.Critical || 0} Critical</span>
+          <span class="iq-pill iq-pill-high"><span class="iq-pill-dot"></span>${sevCount.High || 0} High</span>
+          <span class="iq-pill iq-pill-moderate"><span class="iq-pill-dot"></span>${sevCount.Moderate || 0} Moderate</span>
+        </div>
+        <div class="iq-stat-loss">
+          <div class="iq-stat-num" style="color:#fbbf24">₹${(totalLoss / 1000).toFixed(1)}K</div>
+          <div class="iq-stat-label">Monthly loss exposure</div>
+        </div>
       </div>
-      <div class="inspector-card-meta">
-        <span>📍 <b>${e.zone_name}</b></span>
-        <span>Confidence <b>${e.confidence_pct}%</b></span>
-        <span>Loss <b>₹${(e.est_revenue_loss_inr || 0).toLocaleString('en-IN')}/mo</b></span>
-        <span>Action: <b>${e.recommended_action}</b></span>
+      <div class="iq-controls">
+        <div class="iq-search">
+          <i data-lucide="search"></i>
+          <input type="text" id="iq-search-input" placeholder="Search meter ID, zone, feeder…" value="${_queueState.search.replace(/"/g, '&quot;')}">
+        </div>
+        <div class="iq-chips">
+          <span class="iq-chip ${_queueState.severity === 'all' ? 'active' : ''}" data-filter-sev="all">All severity</span>
+          <span class="iq-chip ${_queueState.severity === 'Critical' ? 'active' : ''} iq-chip-critical" data-filter-sev="Critical">Critical</span>
+          <span class="iq-chip ${_queueState.severity === 'High' ? 'active' : ''} iq-chip-high" data-filter-sev="High">High</span>
+          <span class="iq-chip ${_queueState.severity === 'Moderate' ? 'active' : ''} iq-chip-moderate" data-filter-sev="Moderate">Moderate</span>
+        </div>
+        <div class="iq-chips">
+          <span class="iq-chip ${_queueState.archetype === 'all' ? 'active' : ''}" data-filter-arch="all">All archetypes</span>
+          ${archetypes.map(a => `<span class="iq-chip ${_queueState.archetype === a ? 'active' : ''}" data-filter-arch="${a}">${a} <small style="opacity:0.55">${archCount[a]}</small></span>`).join('')}
+        </div>
+      </div>
+      <div class="iq-result-line">
+        <span><b>${filtered.length}</b> of ${evidence.length} cases shown</span>
+        ${filtered.length !== evidence.length ? '<a href="#" id="iq-clear-filters">Clear filters</a>' : ''}
       </div>
     </div>
-  `).join('');
-  el.querySelectorAll('.inspector-card').forEach(card => {
+  `;
+
+  // ── Cards ────────────────────────────────────────────────────────────
+  const archIcons = {
+    'LT Bypass': 'cable',
+    'Magnetic Tamper': 'magnet',
+    'Neutral Bypass': 'unplug',
+    'Billing Mismatch': 'receipt',
+  };
+
+  const cardsHtml = filtered.length === 0
+    ? '<div class="iq-empty">No cases match the current filter.</div>'
+    : filtered.map((e, i) => {
+        const rank = evidence.findIndex(x => x.meter_id === e.meter_id) + 1;
+        const archIcon = archIcons[e.theft_label] || 'alert-triangle';
+        const sevLow = e.severity.toLowerCase();
+        return `
+          <article class="iq-card iq-card-${sevLow}" data-meter-id="${e.meter_id}">
+            <div class="iq-card-rib"></div>
+            <div class="iq-card-body">
+              <div class="iq-card-row1">
+                <span class="iq-rank">#${String(rank).padStart(2, '0')}</span>
+                <span class="iq-id">${e.meter_id}</span>
+                <span class="iq-sev iq-sev-${sevLow}">${e.severity}</span>
+              </div>
+              <div class="iq-card-row2">
+                <span class="iq-zone"><i data-lucide="map-pin"></i>${e.zone_name}</span>
+                <span class="iq-feeder">${e.feeder_id}</span>
+                <span class="iq-cat">${e.category_label}</span>
+              </div>
+              <div class="iq-arch">
+                <i data-lucide="${archIcon}"></i>
+                <span class="iq-arch-name">${e.theft_label}</span>
+              </div>
+              <div class="iq-conf-row">
+                <span class="iq-conf-label">Confidence</span>
+                <div class="iq-conf-bar"><div class="iq-conf-fill" style="width:${e.confidence_pct}%"></div></div>
+                <span class="iq-conf-val">${e.confidence_pct}%</span>
+              </div>
+              <div class="iq-card-row3">
+                <div class="iq-loss">
+                  <span class="iq-loss-label">Monthly loss</span>
+                  <span class="iq-loss-val">₹${(e.est_revenue_loss_inr || 0).toLocaleString('en-IN')}</span>
+                </div>
+                <div class="iq-action">
+                  <i data-lucide="briefcase"></i>
+                  <span>${e.recommended_action}</span>
+                </div>
+              </div>
+            </div>
+            <div class="iq-card-tail">
+              <span class="iq-open-label">OPEN EVIDENCE</span>
+              <i data-lucide="arrow-right"></i>
+            </div>
+          </article>
+        `;
+      }).join('');
+
+  el.innerHTML = headerHtml + `<div class="iq-grid">${cardsHtml}</div>`;
+
+  // Wire interactions
+  el.querySelectorAll('.iq-card').forEach(card => {
     card.addEventListener('click', () => openMeterEvidence(card.dataset.meterId));
   });
+  el.querySelectorAll('[data-filter-sev]').forEach(chip => {
+    chip.addEventListener('click', () => {
+      _queueState.severity = chip.dataset.filterSev;
+      renderInspectorQueue();
+    });
+  });
+  el.querySelectorAll('[data-filter-arch]').forEach(chip => {
+    chip.addEventListener('click', () => {
+      _queueState.archetype = chip.dataset.filterArch;
+      renderInspectorQueue();
+    });
+  });
+  const searchInput = document.getElementById('iq-search-input');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      _queueState.search = e.target.value || '';
+      // Debounce — re-render shortly after typing stops
+      clearTimeout(_queueState._t);
+      _queueState._t = setTimeout(() => renderInspectorQueue(), 120);
+    });
+    // Keep focus and caret position after re-render
+    if (document.activeElement && document.activeElement.id === 'iq-search-input') {
+      searchInput.focus();
+      const len = searchInput.value.length;
+      searchInput.setSelectionRange(len, len);
+    }
+  }
+  const clearLink = document.getElementById('iq-clear-filters');
+  if (clearLink) clearLink.addEventListener('click', (e) => {
+    e.preventDefault();
+    _queueState.search = ''; _queueState.severity = 'all'; _queueState.archetype = 'all';
+    renderInspectorQueue();
+  });
+
   refreshIcons();
 }
 
@@ -3330,6 +3492,17 @@ function bindEvents() {
     });
   });
 
+  // Tactical overlay: map style filter (Tactical / B&W / NVG / Natural)
+  document.querySelectorAll('.style-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.style-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const style = btn.dataset.style;
+      document.body.setAttribute('data-mapstyle', style);
+      try { localStorage.setItem('gridlytics_mapstyle', style); } catch (e) {}
+    });
+  });
+
   // Tactical overlay: scenes
   document.querySelectorAll('.scene-row').forEach(row => {
     row.addEventListener('click', () => {
@@ -3406,7 +3579,12 @@ function renderAll() {
 // ═══════════════════════════════════════════════════════════════════════ BOOT
 
 async function boot() {
-  refreshIcons();          // Render Lucide SVGs in static markup
+  refreshIcons();
+  // Restore saved map style filter (default: tactical)
+  let savedStyle = 'tactical';
+  try { savedStyle = localStorage.getItem('gridlytics_mapstyle') || 'tactical'; } catch (e) {}
+  document.body.setAttribute('data-mapstyle', savedStyle);
+  document.querySelectorAll('.style-btn').forEach(b => b.classList.toggle('active', b.dataset.style === savedStyle));
   bindEvents();
 
   // Apply shimmers immediately so UI isn't blank
