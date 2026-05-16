@@ -4075,6 +4075,45 @@ function renderDiscomTable() {
 // ═══════════════════════════════════════════════════════════════════════ EVENTS
 
 function bindEvents() {
+  // Language selector
+  const langTrigger  = document.getElementById('lang-trigger');
+  const langDropdown = document.getElementById('lang-dropdown');
+  if (langTrigger && langDropdown) {
+    langTrigger.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = langDropdown.style.display !== 'none';
+      langDropdown.style.display = open ? 'none' : 'block';
+    });
+    document.addEventListener('click', () => { langDropdown.style.display = 'none'; });
+    langDropdown.addEventListener('click', e => e.stopPropagation());
+    document.querySelectorAll('.lang-option').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.lang-option').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const label = btn.dataset.label;
+        const lang  = btn.dataset.lang;
+        const cur   = document.getElementById('lang-current');
+        if (cur) cur.textContent = label;
+        langDropdown.style.display = 'none';
+        try { localStorage.setItem('gridlytics_lang', lang); } catch(e) {}
+        // Show brief toast
+        const toast = document.createElement('div');
+        toast.textContent = `Language: ${btn.textContent.trim()}`;
+        toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1e293b;color:#e2e8f0;padding:8px 20px;border-radius:8px;font-size:9pt;z-index:9999;border:1px solid #3b82f6;pointer-events:none';
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 2000);
+      });
+    });
+    // Restore saved language
+    try {
+      const saved = localStorage.getItem('gridlytics_lang');
+      if (saved) {
+        const btn = document.querySelector(`.lang-option[data-lang="${saved}"]`);
+        if (btn) btn.click();
+      }
+    } catch(e) {}
+  }
+
   // INDIA sub-view toggle (scoped to #map-view-toggle)
   document.querySelectorAll('#map-view-toggle .toggle-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {

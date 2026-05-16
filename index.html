@@ -67,6 +67,24 @@
       <button class="mode-btn" data-mode="india"><i data-lucide="globe-2"></i> India</button>
       <button class="mode-btn active" data-mode="local"><i data-lucide="map-pin"></i> Local</button>
     </div>
+    <!-- Language selector -->
+    <div class="lang-selector" id="lang-selector">
+      <button class="lang-trigger" id="lang-trigger">
+        <i data-lucide="globe"></i>
+        <span id="lang-current">EN</span>
+        <i data-lucide="chevron-down" style="width:12px;height:12px"></i>
+      </button>
+      <div class="lang-dropdown" id="lang-dropdown" style="display:none">
+        <div class="lang-group-label">Global</div>
+        <button class="lang-option active" data-lang="en" data-label="EN">🇬🇧 English</button>
+        <button class="lang-option" data-lang="hi" data-label="हि">🇮🇳 हिंदी (Hindi)</button>
+        <div class="lang-group-label">South India</div>
+        <button class="lang-option" data-lang="kn" data-label="ಕ">🇮🇳 ಕನ್ನಡ (Kannada)</button>
+        <button class="lang-option" data-lang="ta" data-label="த">🇮🇳 தமிழ் (Tamil)</button>
+        <button class="lang-option" data-lang="te" data-label="తె">🇮🇳 తెలుగు (Telugu)</button>
+        <button class="lang-option" data-lang="ml" data-label="മ">🇮🇳 മലയാളം (Malayalam)</button>
+      </div>
+    </div>
     <button class="refresh-btn" id="refresh-btn" title="Refresh all data">↺</button>
     <span class="timestamp" id="last-updated">–</span>
   </div>
