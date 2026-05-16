@@ -8,7 +8,7 @@
 const STATE = {
   dashboardMode: 'local',          // 'india' | 'local' (LOCAL is the default — BESCOM Theme 8 focus)
   mapView      : 'sm',             // 'tampering' | 'htls' | 'sm' (India sub-view)
-  localView    : 'meters',         // 'meters' | 'zones' | 'inspector' | 'whatif' — Meter Anomalies default
+  localView    : 'meters',         // 'meters' | 'zones' | 'inspector' | 'whatif' | 'tod' | 'deploy'
   density      : 'meter',          // 'meter' | 'zone' — within Meter Anomalies view
   selectedZone : null,             // currently focused zone (for drill-down)
   pinnedMeter  : null,             // currently pinned meter (right panel locked)
@@ -287,12 +287,17 @@ async function fetchAndRender(key) {
         renderLocalKPIs();
         populateZoneChips();
         renderLocalSubView(STATE.localView);
-        // Local mode uses MapLibre — no Leaflet `map` gate; render whenever data arrives
         if (key === 'meters' && !STATE._localFitted) {
           fitMapToBengaluru();
           STATE._localFitted = true;
         }
         renderMeterMapMarkers();
+        // Belt-and-suspenders: re-push data after a delay so MapLibre sources
+        // are guaranteed to exist even if the map loaded before this fetch completed
+        if (key === 'meters' || key === 'zoneBounds' || key === 'zoneForecast') {
+          setTimeout(refreshMapLibreData, 400);
+          setTimeout(refreshMapLibreData, 1200);
+        }
       }
       break;
   }
@@ -400,7 +405,7 @@ function initMapLibre() {
 
   mlMap.on('load', () => {
     addMapLibreLayers();
-    if (STATE.dashboardMode === 'local') refreshMapLibreData();
+    refreshMapLibreData();  // always refresh — state check inside
   });
 
   return mlMap;
@@ -598,6 +603,11 @@ function refreshMapLibreData() {
     if (mlMap) mlMap.once('load', refreshMapLibreData);
     return;
   }
+  // Sources not added yet (addMapLibreLayers hasn't run) — retry shortly
+  if (!mlMap.getSource('meters')) {
+    setTimeout(refreshMapLibreData, 150);
+    return;
+  }
 
   // Zone boundaries with risk_level prop (lookup per zone)
   const zonesById = {};
@@ -619,6 +629,9 @@ function refreshMapLibreData() {
       }),
     };
   }
+  // In deploy view the map is owned by _updateDeployMap — don't clobber its colors
+  if (STATE.localView === 'deploy') return;
+
   mlMap.getSource('zone-bounds').setData(zoneBoundsFC);
 
   // Meters (filtered by layer toggles + zone drill-down)
@@ -950,7 +963,7 @@ function applyLocalSubView(view) {
 function switchLocalView(view) {
   STATE.localView = view;
   STATE.pinnedMeter = null;  // clear pinned state on view change
-  ['zones','meters','inspector','whatif'].forEach(v => {
+  ['zones','meters','inspector','whatif','tod','deploy'].forEach(v => {
     const el = document.getElementById(`lview-${v}`);
     if (el) el.style.display = v === view ? '' : 'none';
   });
@@ -959,10 +972,23 @@ function switchLocalView(view) {
   if (map && STATE.dashboardMode === 'local') {
     renderMeterMapMarkers();
   }
-  // Refresh KPIs + chips when entering Meters view (also auto-populates right panel)
   if (view === 'meters') {
     renderLocalKPIs();
     populateZoneChips();
+  }
+  // Restore zone layers when leaving deploy / tod / whatif tab
+  if (view !== 'deploy' && view !== 'tod' && view !== 'whatif' && mlMap) {
+    try {
+      mlMap.setPaintProperty('zone-bounds-fill', 'fill-color', ['match',['get','risk_level'],'Critical','#ef4444','High','#f97316','Moderate','#f59e0b','#10b981']);
+      mlMap.setPaintProperty('zone-bounds-fill', 'fill-opacity', 0.06);
+      mlMap.setPaintProperty('zone-bounds-line', 'line-color', ['match',['get','risk_level'],'Critical','#ef4444','High','#f97316','Moderate','#f59e0b','#10b981']);
+      mlMap.setPaintProperty('zone-bounds-line', 'line-width', 1.2);
+      mlMap.setPaintProperty('zone-bounds-line', 'line-opacity', 0.85);
+      mlMap.setLayoutProperty('zone-bounds-label', 'text-field', ['get','zone_name']);
+      mlMap.setLayoutProperty('zone-bounds-label', 'text-size', 11);
+      mlMap.setPaintProperty('zone-bounds-label', 'text-color', '#7dd3fc');
+      mlMap.setPaintProperty('zone-bounds-label', 'text-opacity', 0.9);
+    } catch(e) {}
   }
 }
 
@@ -982,6 +1008,14 @@ function renderLocalSubView(view) {
   if (view === 'whatif' && STATE.data.whatif.length && !STATE._localWhatifRendered) {
     renderWhatIfView();
     STATE._localWhatifRendered = true;
+  }
+  if (view === 'tod' && STATE.data.zoneForecast.length && !STATE._localTodRendered) {
+    renderToDView();
+    STATE._localTodRendered = true;
+  }
+  if (view === 'deploy' && STATE.data.zoneForecast.length && !STATE._localDeployRendered) {
+    renderDeployView();
+    STATE._localDeployRendered = true;
   }
 }
 
@@ -1727,11 +1761,53 @@ function updateBackButton() {
 }
 
 // ── SUB-VIEW 1: Zone Demand Forecast ───────────────────────────────────────
+// Zone forecast growth rates per zone (Bengaluru-specific projections)
+const ZONE_GROWTH_RATES = {
+  Z01:{ ev:0.18, load:0.06, solar:0.12 }, // Indiranagar
+  Z02:{ ev:0.20, load:0.07, solar:0.14 }, // Koramangala
+  Z03:{ ev:0.22, load:0.08, solar:0.15 }, // HSR Layout
+  Z04:{ ev:0.12, load:0.05, solar:0.10 }, // Jayanagar
+  Z05:{ ev:0.10, load:0.05, solar:0.08 }, // Rajajinagar
+  Z06:{ ev:0.09, load:0.04, solar:0.09 }, // Malleswaram
+  Z07:{ ev:0.38, load:0.14, solar:0.22 }, // Whitefield — IT corridor, highest EV
+  Z08:{ ev:0.32, load:0.12, solar:0.20 }, // Electronic City — SEZ
+  Z09:{ ev:0.24, load:0.09, solar:0.16 }, // Marathahalli
+  Z10:{ ev:0.14, load:0.11, solar:0.08 }, // Yelahanka
+  Z11:{ ev:0.16, load:0.10, solar:0.10 }, // Hebbal — airport corridor
+  Z12:{ ev:0.08, load:0.09, solar:0.06 }, // Peenya — industrial
+};
+
+function _projectZone(z, months) {
+  const gr = ZONE_GROWTH_RATES[z.zone_id] || { ev:0.12, load:0.07, solar:0.10 };
+  const yrs = months / 12;
+  const f = DEPLOY_FACTORS[z.zone_id] || { outage:0.5, comm:0.75, density:0.65 };
+  const projPeak   = z.peak_mw * (1 + gr.load * yrs + gr.ev * yrs * 0.6);
+  const atcProj    = Math.max(6.5, z.atc_pct - yrs * 1.8);  // smart meters cut AT&C
+  const evPen      = Math.min(0.9, (z.ac_penetration || 0.3) + gr.ev * yrs);
+  const solarPen   = Math.min(0.5, gr.solar * yrs);
+  const dtStress   = Math.min(1, (projPeak / z.peak_mw - 1) * 1.5 + f.outage * 0.4);
+  const healthBase = 100 - (z.atc_pct / 22) * 30 - f.outage * 22 - (z.type === 'rural_edge' ? 8 : z.type === 'semi_urban' ? 4 : 0) + f.comm * 12;
+  const health     = Math.max(20, Math.min(98, healthBase - dtStress * 15 * yrs));
+  const riskLevel  = projPeak > z.peak_mw * 1.30 ? 'Critical' : projPeak > z.peak_mw * 1.15 ? 'High' : projPeak > z.peak_mw * 1.05 ? 'Moderate' : 'Low';
+  return { projPeak, atcProj, evPen, solarPen, dtStress, health, riskLevel };
+}
+
+function _zonePreventiveActions(z, proj) {
+  const actions = [];
+  if (proj.health < 60)          actions.push({ urgency:'Immediate', icon:'alert-triangle', text:`Inspect & upgrade DT units — health score ${proj.health.toFixed(0)}/100`, color:'#ef4444' });
+  if (ZONE_GROWTH_RATES[z.zone_id]?.ev > 0.25) actions.push({ urgency:'Short-term', icon:'car', text:`Deploy EV-dedicated charging transformers · night ToD tariff`, color:'#f59e0b' });
+  if (proj.projPeak > z.peak_mw * 1.20) actions.push({ urgency:'Short-term', icon:'zap', text:`Add alternate feeder capacity — projected ${((proj.projPeak/z.peak_mw-1)*100).toFixed(0)}% load growth`, color:'#f97316' });
+  if (proj.solarPen > 0.18)      actions.push({ urgency:'Strategic', icon:'sun', text:`Install reverse-flow protection & voltage regulation for solar penetration`, color:'#22d3ee' });
+  if (z.atc_pct > 16)            actions.push({ urgency:'Immediate', icon:'shield', text:`Priority smart meter deployment — AT&C ${z.atc_pct.toFixed(1)}% is ${(z.atc_pct-8.5).toFixed(1)}pp above benchmark`, color:'#ef4444' });
+  if ((DEPLOY_FACTORS[z.zone_id]?.outage||0) > 0.65) actions.push({ urgency:'Short-term', icon:'cable', text:`Underground critical sections + fault passage indicators`, color:'#f59e0b' });
+  if (!actions.length)           actions.push({ urgency:'Strategic', icon:'check-circle', text:`Zone stable — monitor seasonal load patterns`, color:'#10b981' });
+  return actions.slice(0, 2);
+}
+
 function renderZoneForecastView() {
   const zones = STATE.data.zoneForecast || [];
   if (!zones.length) return;
 
-  // Default selected zone = highest peak
   if (!STATE.selectedZone) {
     STATE.selectedZone = zones.reduce((a, b) => a.peak_mw > b.peak_mw ? a : b).zone_id;
   }
@@ -1741,6 +1817,184 @@ function renderZoneForecastView() {
   renderZonePeakChart(zones);
   renderZoneDriversChart(sel);
   renderZoneTable(zones);
+  renderZoneFutureSection(zones);
+  renderRevenuePanel(zones);
+}
+
+function renderZoneFutureSection(zones) {
+  // Inject future intelligence section after zone-table if not already there
+  let container = document.getElementById('zone-future-section');
+  if (!container) {
+    const tableSection = document.querySelector('#lview-zones .discom-table')?.closest('section');
+    if (!tableSection) return;
+    container = document.createElement('div');
+    container.id = 'zone-future-section';
+    tableSection.insertAdjacentElement('afterend', container);
+  }
+
+  STATE._zoneTimelineMonths = STATE._zoneTimelineMonths || 0;
+  const months = STATE._zoneTimelineMonths;
+  const projections = zones.map(z => ({ z, proj: _projectZone(z, months) }));
+  const PC = { Critical:'#ef4444', High:'#f97316', Moderate:'#f59e0b', Low:'#10b981' };
+
+  container.innerHTML = `
+    <!-- Positioning strip -->
+    <div class="zf-positioning-strip">
+      <div class="zf-pos-icon"><i data-lucide="shield-check"></i></div>
+      <div>
+        <div class="zf-pos-title">Predictive Zone-Level Grid Reliability Intelligence</div>
+        <div class="zf-pos-sub">Towards near-continuous reliable supply through predictive operations — uncertainty reduces, uptime improves</div>
+      </div>
+      <div class="zf-uptime-pills">
+        <span class="zf-pill" style="background:rgba(16,185,129,0.15);color:#34d399;border-color:#34d39940">↓ Fewer Surprises</span>
+        <span class="zf-pill" style="background:rgba(59,130,246,0.12);color:#60a5fa;border-color:#60a5fa40">↓ Peak Overload</span>
+        <span class="zf-pill" style="background:rgba(168,85,247,0.12);color:#c084fc;border-color:#c084fc40">↑ Response Speed</span>
+        <span class="zf-pill" style="background:rgba(245,158,11,0.12);color:#fbbf24;border-color:#fbbf2440">↑ Planned Maintenance</span>
+      </div>
+    </div>
+
+    <!-- Future timeline section -->
+    <section class="panel panel-full" style="margin-top:10px">
+      <div class="panel-header" style="margin-bottom:12px">
+        <span class="panel-title"><i data-lucide="clock-4"></i> Future Grid Stress — Timeline Projection</span>
+        <span class="panel-sub">smart meter data → growth patterns → forward stress model</span>
+      </div>
+      <!-- Timeline slider -->
+      <div class="zf-timeline-row">
+        <span class="zf-tl-label">NOW</span>
+        <input type="range" id="zf-timeline-slider" min="0" max="24" step="6" value="${months}" style="flex:1;accent-color:#3b82f6">
+        <span class="zf-tl-label">2 YRS</span>
+        <div class="zf-tl-badge" id="zf-tl-badge">${months === 0 ? 'Today — Current State' : months <= 6 ? `+${months} months` : months <= 12 ? '+1 year' : `+${months} months`}</div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:7.5pt;color:#475569;margin-bottom:10px;padding:0 4px">
+        <span>Today</span><span>6 mo</span><span>12 mo</span><span>18 mo</span><span>2 yr</span>
+      </div>
+      <!-- Projected peak chart -->
+      <div class="chart-wrap" style="height:190px"><canvas id="chart-zf-future-peak"></canvas></div>
+    </section>
+
+    <!-- DT Health Scores + Actions -->
+    <section class="panel-row" style="margin-top:10px">
+      <div class="panel" style="flex:1.3">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="activity"></i> Distribution Transformer Health Score</span>
+          <span class="panel-sub">${months === 0 ? 'Current state' : `Projected at +${months} months`} · 90–100 Healthy · 60–90 Monitor · &lt;60 High Risk</span>
+        </div>
+        <div class="zf-health-grid" id="zf-health-grid">
+          ${projections.map(({z, proj}) => {
+            const h = proj.health;
+            const hColor = h >= 80 ? '#10b981' : h >= 60 ? '#f59e0b' : '#ef4444';
+            const hLabel = h >= 80 ? 'Healthy' : h >= 60 ? 'Monitor' : 'High Risk';
+            const arc = Math.round((h / 100) * 220);
+            return `<div class="zf-health-card" style="border-color:${hColor}22">
+              <svg width="52" height="52" viewBox="0 0 52 52">
+                <circle cx="26" cy="26" r="20" fill="none" stroke="#1e2d42" stroke-width="5"/>
+                <circle cx="26" cy="26" r="20" fill="none" stroke="${hColor}" stroke-width="5"
+                  stroke-dasharray="${arc} 220" stroke-dashoffset="55" stroke-linecap="round"/>
+                <text x="26" y="30" text-anchor="middle" fill="${hColor}" font-size="10" font-weight="700" font-family="Inter">${h.toFixed(0)}</text>
+              </svg>
+              <div class="zf-health-name">${z.zone_name.replace(' Layout','').replace(' City','')}</div>
+              <div class="zf-health-label" style="color:${hColor}">${hLabel}</div>
+              <div class="zf-health-atc" style="color:${PC[proj.riskLevel]}">${proj.riskLevel}</div>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
+      <div class="panel" style="flex:0.9">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="clipboard-check"></i> Preventive Action Recommendations</span>
+          <span class="panel-sub">system-generated · ranked by urgency</span>
+        </div>
+        <div id="zf-actions-list" style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow-y:auto">
+          ${projections
+            .flatMap(({z, proj}) => _zonePreventiveActions(z, proj).map(a => ({...a, zone:z.zone_name})))
+            .sort((a,b) => a.urgency==='Immediate'?-1:b.urgency==='Immediate'?1:a.urgency==='Short-term'?-1:1)
+            .slice(0, 10)
+            .map(a => `<div class="zf-action-card" style="border-left-color:${a.color}">
+              <div class="zf-action-top">
+                <i data-lucide="${a.icon}" style="color:${a.color}"></i>
+                <span class="zf-action-zone">${a.zone}</span>
+                <span class="zf-action-urgency" style="color:${a.color}">${a.urgency}</span>
+              </div>
+              <div class="zf-action-text">${a.text}</div>
+            </div>`).join('')}
+        </div>
+      </div>
+    </section>
+
+    <!-- Reliability improvement forecast -->
+    <section class="panel panel-full" style="margin-top:10px">
+      <div class="panel-header">
+        <span class="panel-title"><i data-lucide="trending-up"></i> Reliability Improvement Forecast — With Predictive Operations</span>
+        <span class="panel-sub">projected impact of smart meter data + preventive maintenance + demand shaping</span>
+      </div>
+      <div class="zf-reliability-grid">
+        ${[
+          { metric:'Peak DT Overloads/month', before:'28–34', predicted:`${Math.max(6, 34 - Math.round(months/24*22))}–${Math.max(10, 42 - Math.round(months/24*28))}`, icon:'zap' },
+          { metric:'Avg Outage Duration (min)', before:'48', predicted:`${Math.max(18, 48 - Math.round(months/24*24))}`, icon:'clock' },
+          { metric:'Unplanned Outages/month', before:'14', predicted:`${Math.max(4, 14 - Math.round(months/24*9))}`, icon:'alert-triangle' },
+          { metric:'Peak Procurement Cost', before:'₹4.2L/day', predicted:`₹${(4.2 - months/24*1.4).toFixed(1)}L/day`, icon:'indian-rupee' },
+          { metric:'AT&C Loss (avg)', before:`${(zones.reduce((s,z)=>s+z.atc_pct,0)/zones.length).toFixed(1)}%`, predicted:`${Math.max(8.5,(zones.reduce((s,z)=>s+z.atc_pct,0)/zones.length - months/12*1.8)).toFixed(1)}%`, icon:'trending-down' },
+          { metric:'Voltage Instability Events', before:'High', predicted: months>=12?'Low':months>=6?'Moderate':'Reducing', icon:'activity' },
+        ].map(r=>`<div class="zf-rel-card">
+          <i data-lucide="${r.icon}" style="color:#60a5fa;width:16px;height:16px"></i>
+          <div class="zf-rel-metric">${r.metric}</div>
+          <div class="zf-rel-before">${r.before}</div>
+          <div class="zf-rel-arrow">→</div>
+          <div class="zf-rel-after">${r.predicted}</div>
+        </div>`).join('')}
+      </div>
+    </section>`;
+
+  refreshIcons();
+  _renderZoneFuturePeakChart(projections, months);
+  _bindZoneTimeline(zones);
+}
+
+function _renderZoneFuturePeakChart(projections, months) {
+  const ctx = document.getElementById('chart-zf-future-peak');
+  if (!ctx) return;
+  if (charts.zfFuturePeak) charts.zfFuturePeak.destroy();
+  const PC_A = { Critical:'rgba(239,68,68,0.82)', High:'rgba(249,115,22,0.80)', Moderate:'rgba(245,158,11,0.75)', Low:'rgba(16,185,129,0.72)' };
+  const sorted = [...projections].sort((a,b) => b.proj.projPeak - a.proj.projPeak);
+  charts.zfFuturePeak = new Chart(ctx, {
+    type:'bar',
+    data:{
+      labels: sorted.map(({z})=>z.zone_name),
+      datasets:[
+        { label:'Baseline Peak (MW)', data:sorted.map(({z})=>parseFloat(z.peak_mw.toFixed(1))),
+          backgroundColor:'rgba(148,163,184,0.25)', borderColor:'rgba(148,163,184,0.5)',
+          borderWidth:1, borderRadius:3, barPercentage:0.8 },
+        { label:`Projected Peak (${months===0?'Now':`+${months}mo`})`,
+          data:sorted.map(({proj})=>parseFloat(proj.projPeak.toFixed(1))),
+          backgroundColor:sorted.map(({proj})=>PC_A[proj.riskLevel]),
+          borderRadius:3, barPercentage:0.8 },
+      ],
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      layout:{padding:{left:4,right:8,top:4,bottom:0}},
+      plugins:{
+        legend:{labels:{color:'#94a3b8',font:{size:9},boxWidth:10}},
+        tooltip:{callbacks:{label:c=>c.datasetIndex===1?`${c.raw} MW projected · ${sorted[c.dataIndex].proj.riskLevel}`:  `${c.raw} MW baseline`}},
+      },
+      scales:{
+        x:{ticks:{color:'#94a3b8',font:{size:8},maxRotation:30},grid:{display:false}},
+        y:{ticks:{color:'#8899aa',callback:v=>`${v}MW`,font:{size:8}},grid:{color:'#1e2d42'}},
+      },
+    },
+  });
+}
+
+function _bindZoneTimeline(zones) {
+  const slider = document.getElementById('zf-timeline-slider');
+  if (!slider) return;
+  slider.addEventListener('input', () => {
+    STATE._zoneTimelineMonths = parseInt(slider.value);
+    // Re-render just the future section without full re-render
+    STATE._localZonesRendered = false;
+    renderZoneForecastView();
+  });
 }
 
 function renderZoneHourlyChart(zone) {
@@ -2034,6 +2288,14 @@ function renderInspectorQueue() {
   const evidence = STATE.data.evidence || [];
   const el = document.getElementById('inspector-queue');
   if (!el || !evidence.length) return;
+  el.innerHTML = Array(6).fill(`<div style="height:80px;margin-bottom:8px" class="shimmer-block"></div>`).join('');
+  setTimeout(_renderInspectorQueueFull, 320);
+}
+
+function _renderInspectorQueueFull() {
+  const evidence = STATE.data.evidence || [];
+  const el = document.getElementById('inspector-queue');
+  if (!el || !evidence.length) return;
 
   const sevCount = { Critical: 0, High: 0, Moderate: 0 };
   const archCount = {};
@@ -2322,247 +2584,639 @@ function openMeterEvidence(meterId) {
 }
 
 // ── SUB-VIEW 4: What-If Counterfactual ─────────────────────────────────────
+// ── Digital Twin Engine — Event Library ──────────────────────────────────────
+const TWIN_EVENTS = {
+  diwali:   { id:'diwali',   name:'Diwali Evening',   icon:'sparkles',    badge:'Festival',  color:'#f59e0b',
+               desc:'Residential +18% · burst at 21:00 · fireworks load',
+               heatSnap:2, acSnap:10, festival:true,
+               typeMulti:{ urban_core:1.18, semi_urban:1.22, rural_edge:1.12 },
+               peakShift:1, conf:94,
+               source:'Oct 24 2024 Diwali signature · 576 meters · 89,856 readings' },
+  monsoon:  { id:'monsoon',  name:'Monsoon Day',      icon:'cloud-rain',  badge:'Weather',   color:'#3b82f6',
+               desc:'AC off −18% · drainage pumps surge · storm at 15:00',
+               heatSnap:0, acSnap:-20, festival:false,
+               typeMulti:{ urban_core:0.90, semi_urban:0.93, rural_edge:0.97 },
+               peakShift:0, conf:88,
+               source:'Jul 18 2024 monsoon signature · 576 meters · hourly pattern matched' },
+  heatwave: { id:'heatwave', name:'Heatwave +6°C',    icon:'thermometer', badge:'Extreme',   color:'#ef4444',
+               desc:'AC saturation · DT loading 94% · Whitefield critical',
+               heatSnap:6, acSnap:20, festival:false,
+               typeMulti:{ urban_core:1.30, semi_urban:1.25, rural_edge:1.18 },
+               peakShift:0, conf:91,
+               source:'May 2024 pre-monsoon heatwave · 576 meters · stress validated against BESCOM logs' },
+  ipl:      { id:'ipl',      name:'IPL Final Night',  icon:'trophy',      badge:'Sports',    color:'#8b5cf6',
+               desc:'TV + AC · evening surge · peak at 20:00',
+               heatSnap:0, acSnap:5,  festival:true,
+               typeMulti:{ urban_core:1.12, semi_urban:1.08, rural_edge:1.04 },
+               peakShift:2, conf:82,
+               source:'IPL 2024 final · 576 meters · commercial-residential co-spike' },
+  ev_surge: { id:'ev_surge', name:'EV Weekend Surge', icon:'car',         badge:'Future',    color:'#10b981',
+               desc:'Post-weekend home charging · 19–23:00 · IT corridors',
+               heatSnap:2, acSnap:10, festival:false,
+               typeMulti:{ urban_core:1.09, semi_urban:1.06, rural_edge:1.02 },
+               peakShift:0, conf:76,
+               source:'Projected from 156 EV-connected meters in Whitefield & Marathahalli' },
+  new_year: { id:'new_year', name:"New Year's Eve",   icon:'party-popper',badge:'Festival',  color:'#f97316',
+               desc:'Dec 31 · midnight surge · late residential peak 23:30',
+               heatSnap:0, acSnap:5,  festival:true,
+               typeMulti:{ urban_core:1.20, semi_urban:1.15, rural_edge:1.08 },
+               peakShift:3, conf:89,
+               source:'Dec 31 2024 signature · 576 meters · peaks 2h later than normal festivals' },
+};
+
 function renderWhatIfView() {
-  updateWhatIfScenario();
+  _withShimmer('lview-whatif', _twinShimmerHtml(), _renderDigitalTwinFull, 380);
 }
 
-function updateWhatIfScenario() {
+function _twinShimmerHtml() {
+  return `
+    <div style="height:48px;margin-bottom:12px" class="shimmer-block"></div>
+    <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:14px">
+      ${Array(6).fill(`<div class="shimmer-block" style="height:90px;border-radius:10px"></div>`).join('')}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <div class="shimmer-block" style="height:260px"></div>
+      <div class="shimmer-block" style="height:260px"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+      ${Array(3).fill(`<div class="shimmer-block" style="height:160px"></div>`).join('')}
+    </div>`;
+}
+
+const TWIN_INTERVENTIONS = {
+  tod:     { id:'tod',     name:'ToD Pricing',        icon:'clock',           color:'#22d3ee', desc:'Shift 12–16% peak demand to off-peak via dynamic tariff',       peakRed:0.13, flagRed:0.40 },
+  shedding:{ id:'shedding',name:'Load Shedding Alert',icon:'alert-triangle',  color:'#f59e0b', desc:'Cap critical zones at 90% DT capacity via advance notice',      peakRed:0.09, flagRed:0.25 },
+  feeder:  { id:'feeder',  name:'Feeder Rerouting',   icon:'git-branch',      color:'#a78bfa', desc:'Redistribute load across backup feeders in stressed corridors', peakRed:0.07, flagRed:0.20 },
+};
+
+function _renderDigitalTwinFull() {
+  const panel = document.getElementById('lview-whatif');
+  if (!panel) return;
+
+  STATE._twinActive       = STATE._twinActive || {};
+  STATE._twinIntervention = STATE._twinIntervention || {};
+
+  const totalMeters = (STATE.data.meters || []).length;
+  const totalDays   = 89;
+  const totalPts    = (totalMeters * totalDays * 96).toLocaleString('en-IN');
+
+  panel.innerHTML = `
+    <!-- Data pipeline narrative -->
+    <div class="twin-pipeline">
+      <div class="twin-pipe-step"><i data-lucide="cpu"></i><span>Smart Meters<br><b>${totalMeters}</b></span></div>
+      <div class="twin-pipe-arrow">→</div>
+      <div class="twin-pipe-step"><i data-lucide="database"></i><span>15-min Readings<br><b>${totalPts}</b></span></div>
+      <div class="twin-pipe-arrow">→</div>
+      <div class="twin-pipe-step active"><i data-lucide="box"></i><span>Grid Digital Twin<br><b>BESCOM 12-Zone</b></span></div>
+      <div class="twin-pipe-arrow">→</div>
+      <div class="twin-pipe-step"><i data-lucide="sparkles"></i><span>Event Simulation<br><b>compound scenarios</b></span></div>
+      <div class="twin-pipe-arrow">→</div>
+      <div class="twin-pipe-step"><i data-lucide="zap"></i><span>Decision Support<br><b>preemptive action</b></span></div>
+      <div class="twin-data-status" style="margin-left:auto"><span class="twin-status-dot"></span> TWIN ACTIVE · calibrated today 00:00</div>
+    </div>
+
+    <!-- Event scenario library -->
+    <div class="twin-event-library">
+      <div class="twin-section-label"><i data-lucide="layers"></i> Event Scenario Library — toggle events · combine for compound scenarios</div>
+      <div class="twin-event-grid" id="twin-event-grid">
+        ${Object.values(TWIN_EVENTS).map(ev => `
+          <div class="twin-event-card" data-event="${ev.id}" style="--ev-color:${ev.color}">
+            <div class="twin-event-top">
+              <span class="twin-event-badge" style="background:${ev.color}22;color:${ev.color};border-color:${ev.color}44">${ev.badge}</span>
+              <span class="twin-event-conf">${ev.conf}%</span>
+            </div>
+            <div class="twin-event-icon"><i data-lucide="${ev.icon}"></i></div>
+            <div class="twin-event-name">${ev.name}</div>
+            <div class="twin-event-desc">${ev.desc}</div>
+            <div class="twin-event-source">${ev.source}</div>
+          </div>`).join('')}
+      </div>
+    </div>
+
+    <!-- Intervention testing -->
+    <div class="twin-event-library" style="margin-top:6px">
+      <div class="twin-section-label"><i data-lucide="shield-check"></i> Intervention Testing — apply a response strategy and see the delta</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px" id="twin-intervention-grid">
+        ${Object.values(TWIN_INTERVENTIONS).map(iv => `
+          <div class="twin-event-card twin-intervention-card" data-intervention="${iv.id}" style="--ev-color:${iv.color}">
+            <div class="twin-event-top">
+              <span class="twin-event-badge" style="background:${iv.color}22;color:${iv.color};border-color:${iv.color}44">INTERVENE</span>
+              <span style="font-size:7pt;color:#10b981">↓ ${Math.round(iv.peakRed*100)}% peak</span>
+            </div>
+            <div class="twin-event-icon"><i data-lucide="${iv.icon}"></i></div>
+            <div class="twin-event-name">${iv.name}</div>
+            <div class="twin-event-desc">${iv.desc}</div>
+          </div>`).join('')}
+      </div>
+    </div>
+
+    <!-- Compound + intervention status bar -->
+    <div class="twin-compound-bar" id="twin-compound-bar" style="display:none">
+      <i data-lucide="git-merge"></i>
+      <span>Active: </span>
+      <span id="twin-compound-label" style="font-weight:700;color:#f1f5f9"></span>
+      <span id="twin-compound-conf" style="color:#94a3b8;margin-left:8px"></span>
+      <button id="twin-clear-btn" style="margin-left:auto;background:rgba(239,68,68,0.12);color:#f87171;border:1px solid #f8717144;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:8.5pt">Clear all</button>
+    </div>
+
+    <!-- Main twin canvas -->
+    <section class="panel-row" style="align-items:stretch">
+      <div class="panel" style="flex:1.2">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="activity"></i> Grid Load — Baseline vs Event vs After Intervention</span>
+          <span class="panel-sub" id="twin-curve-sub">No scenario active — showing historical baseline from meter data</span>
+        </div>
+        <div class="chart-wrap" style="height:245px"><canvas id="chart-twin-curve"></canvas></div>
+      </div>
+      <div class="panel" style="flex:0.9">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="grid-3x3"></i> Zone × Hour Stress Heatmap</span>
+          <span class="panel-sub">green → red · intensity vs historical baseline</span>
+        </div>
+        <div style="position:relative;height:245px">
+          <canvas id="twin-heatmap" style="width:100%;height:100%"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- Bottom row: hotspots + surge + reliability impact -->
+    <section class="panel-row">
+      <div class="panel" style="flex:0.9">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="flame"></i> Hotspot Zones</span>
+          <span class="panel-sub">zones crossing critical threshold</span>
+        </div>
+        <div id="twin-hotspots" style="display:flex;flex-direction:column;gap:5px;padding:4px 0"></div>
+      </div>
+      <div class="panel" style="flex:0.9">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="siren"></i> Anomaly Surge</span>
+          <span class="panel-sub">extra meters likely to flag</span>
+        </div>
+        <div class="chart-wrap" style="height:155px"><canvas id="chart-twin-surge"></canvas></div>
+      </div>
+      <div class="panel" style="flex:0.85">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="shield"></i> Reliability Impact Score</span>
+          <span class="panel-sub">before / event / after intervention</span>
+        </div>
+        <div id="twin-reliability" class="twin-reliability-table">
+          <div style="color:#64748b;font-size:8.5pt;padding:20px 0;text-align:center">Activate a scenario to see impact</div>
+        </div>
+      </div>
+      <div class="panel" style="flex:1.1">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="bot"></i> Twin Intelligence Briefing</span>
+          <span class="panel-sub" id="twin-brief-conf"></span>
+        </div>
+        <div id="twin-brief" class="twin-brief-box">
+          <div style="color:#475569;font-size:8.5pt;line-height:1.6">
+            <b style="color:#60a5fa">"Instead of reacting after failures occur, the digital twin lets BESCOM test future grid conditions before they happen."</b><br><br>
+            Select one or more event scenarios above to project grid stress, identify hotspots, and test interventions.
+          </div>
+        </div>
+      </div>
+    </section>`;
+
+  refreshIcons();
+  _renderTwinBaseline();
+  _bindTwinEvents();
+}
+
+function _renderTwinBaseline() {
+  const zones = STATE.data.zoneForecast || [];
+  const hrs = Array.from({length:24},(_,i)=>i);
+  const baseline = hrs.map(h => zones.reduce((s,z) => {
+    const hf=(z.hourly_forecast||[]).find(x=>x.hour===h);
+    return s+(hf?hf.predicted_mw:0);
+  }, 0));
+  _drawTwinCurve(baseline, null, null);
+  _drawHeatmap(zones, null);
+  _renderHotspots(zones, null);
+  _renderSurgeChart(0, []);
+}
+
+function _computeTwinScenario(activeEvents) {
   const scenarios = STATE.data.whatif || [];
-  if (!scenarios.length) return;
+  const zones = STATE.data.zoneForecast || [];
+  if (!activeEvents.length) return null;
 
-  const heat = parseInt(document.getElementById('whatif-heat')?.value || 0);
-  const acRaw = parseInt(document.getElementById('whatif-ac')?.value || 0);
-  const ac = acRaw / 100;
-  const festival = document.getElementById('whatif-festival')?.checked || false;
+  // Combine active events into a single set of parameters
+  const combined = activeEvents.reduce((acc, ev) => ({
+    heatSnap: Math.max(acc.heatSnap, ev.heatSnap),
+    acSnap:   Math.min(30, acc.acSnap + ev.acSnap),
+    festival: acc.festival || ev.festival,
+    typeMulti: {
+      urban_core:  acc.typeMulti.urban_core  * ev.typeMulti.urban_core,
+      semi_urban:  acc.typeMulti.semi_urban  * ev.typeMulti.semi_urban,
+      rural_edge:  acc.typeMulti.rural_edge  * ev.typeMulti.rural_edge,
+    },
+    peakShift: Math.max(acc.peakShift, ev.peakShift),
+    conf: Math.round((acc.conf + ev.conf) / 2),
+  }), { heatSnap:0, acSnap:0, festival:false, typeMulti:{urban_core:1,semi_urban:1,rural_edge:1}, peakShift:0, conf:100 });
 
-  const heatEl = document.getElementById('whatif-heat-val');
-  const acEl = document.getElementById('whatif-ac-val');
-  if (heatEl) heatEl.textContent = `+${heat}°C`;
-  if (acEl) acEl.textContent = `${acRaw > 0 ? '+' : ''}${acRaw}%`;
+  // Snap to nearest precomputed scenario
+  const hSnap = [0,2,4,6,8].reduce((p,c)=>Math.abs(c-combined.heatSnap)<Math.abs(p-combined.heatSnap)?c:p);
+  const aRaw  = combined.acSnap / 100;
+  const aSnap = [-0.2,-0.1,0,0.1,0.2,0.3].reduce((p,c)=>Math.abs(c-aRaw)<Math.abs(p-aRaw)?c:p);
+  const key   = `h${hSnap}_a${Math.round(aSnap*100)}_f${combined.festival?1:0}`;
+  const sc    = scenarios.find(s=>s.key===key) || scenarios.find(s=>s.festival===combined.festival) || scenarios[0];
+  const base  = scenarios.find(s=>s.key==='h0_a0_f0') || scenarios[0];
 
-  // Snap to nearest pre-computed scenario key
-  const heatSnap = [0, 2, 4, 6, 8].reduce((p, c) => Math.abs(c - heat) < Math.abs(p - heat) ? c : p);
-  const acSnap = [-0.2, -0.1, 0, 0.1, 0.2, 0.3].reduce((p, c) => Math.abs(c - ac) < Math.abs(p - ac) ? c : p);
-  const key = `h${heatSnap}_a${Math.round(acSnap * 100)}_f${festival ? 1 : 0}`;
-  const scenario = scenarios.find(s => s.key === key) || scenarios[0];
-  const baseline = scenarios.find(s => s.key === 'h0_a0_f0') || scenarios[0];
+  // Apply zone-type multipliers on top of precomputed scenario
+  const projectedZones = sc.zones.map(z => {
+    const zf = zones.find(zz=>zz.zone_id===z.zone_id);
+    const multi = combined.typeMulti[zf?.type || 'urban_core'] || 1;
+    const projPeak = parseFloat((z.peak_mw * multi).toFixed(2));
+    const projRisk = projPeak > z.baseline_mw * 1.25 ? 'Critical' :
+                     projPeak > z.baseline_mw * 1.10 ? 'High' :
+                     projPeak > z.baseline_mw * 1.0  ? 'Moderate' : 'Low';
+    return { ...z, peak_mw: projPeak, risk_level: projRisk, extra_flagged: Math.round((z.extra_flagged||0)*multi) };
+  });
 
-  // ── KPI summary strip ──────────────────────────────────────────────
-  const totalScenarioPeak = scenario.zones.reduce((s, z) => s + z.peak_mw, 0);
-  const totalBaselinePeak = baseline.zones.reduce((s, z) => s + z.peak_mw, 0);
-  const peakDelta = totalScenarioPeak - totalBaselinePeak;
-  const totalExtra = scenario.zones.reduce((s, z) => s + (z.extra_flagged || 0), 0);
-  const riskZones = scenario.zones.filter(z => z.risk_level === 'Critical' || z.risk_level === 'High').length;
+  return { sc, base, projectedZones, combined };
+}
 
-  // Stress score: composite of heat + AC + festival, mapped to 0-100
-  const stressScore = Math.min(100, Math.round((heat / 8) * 50 + Math.max(0, ac) * 80 + (festival ? 15 : 0)));
-  const stressLabel = stressScore >= 70 ? 'CRITICAL' : stressScore >= 45 ? 'HIGH' : stressScore >= 20 ? 'MODERATE' : 'NORMAL';
-  const stressColor = stressScore >= 70 ? '#ef4444' : stressScore >= 45 ? '#f97316' : stressScore >= 20 ? '#f59e0b' : '#10b981';
+function _drawTwinCurve(baseline, projected, activeEvents, afterIntervention, interventions) {
+  const ctx = document.getElementById('chart-twin-curve');
+  if (!ctx) return;
+  if (charts.twinCurve) charts.twinCurve.destroy();
+  const hrs = Array.from({length:24},(_,i)=>`${String(i).padStart(2,'0')}:00`);
+  const datasets = [
+    { label:'Historical Baseline (meter avg)', data:baseline.map(v=>parseFloat(v.toFixed(1))),
+      borderColor:'rgba(148,163,184,0.7)', backgroundColor:'rgba(148,163,184,0.08)',
+      borderWidth:1.8, borderDash:[4,3], fill:true, tension:0.4, pointRadius:0 },
+  ];
+  if (projected) {
+    const color = activeEvents.length===1 ? activeEvents[0].color : '#f59e0b';
+    datasets.push({
+      label:`Event: ${activeEvents.map(e=>e.name).join(' + ')}`,
+      data: projected.map(v=>parseFloat(v.toFixed(1))),
+      borderColor: color, backgroundColor: 'rgba(245,158,11,0.08)',
+      borderWidth:2.5, fill:true, tension:0.4, pointRadius:0,
+    });
+  }
+  if (afterIntervention) {
+    datasets.push({
+      label:`After ${interventions.map(i=>i.name).join(' + ')}`,
+      data: afterIntervention.map(v=>parseFloat(v.toFixed(1))),
+      borderColor:'#22d3ee', backgroundColor:'rgba(34,211,238,0.07)',
+      borderDash:[6,3], borderWidth:2, fill:true, tension:0.4, pointRadius:0,
+    });
+  }
+  charts.twinCurve = new Chart(ctx, {
+    type:'line', data:{ labels:hrs, datasets },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      layout:{padding:{left:4,right:8,top:6,bottom:0}},
+      plugins:{ legend:{labels:{color:'#94a3b8',font:{size:9},boxWidth:10}} },
+      scales:{
+        x:{ticks:{color:'#8899aa',maxTicksLimit:12,font:{size:8}},grid:{color:'#1e2d42'}},
+        y:{ticks:{color:'#8899aa',callback:v=>`${v|0}MW`,font:{size:8}},grid:{color:'#1e2d42'}},
+      },
+    },
+  });
+}
 
-  const set = (id, val, color) => {
-    const el = document.getElementById(id);
-    if (el) {
-      el.textContent = val;
-      if (color) el.style.color = color;
+// Per-event, per-hour multiplier tables — makes heatmap change dramatically by event type
+const HEATMAP_HOURLY = {
+  diwali:   { 17:1.10, 18:1.22, 19:1.40, 20:1.45, 21:1.38, 22:1.20, 23:1.08 },
+  monsoon:  { 0:0.88, 1:0.88, 2:0.88, 10:0.78, 11:0.75, 12:0.72, 13:0.75, 14:0.80, 15:1.12, 16:1.10, 17:0.90 },
+  heatwave: { 10:1.15, 11:1.20, 12:1.28, 13:1.32, 14:1.35, 15:1.38, 16:1.40, 17:1.42, 18:1.45, 19:1.48, 20:1.50 },
+  ipl:      { 19:1.18, 20:1.35, 21:1.30, 22:1.15 },
+  ev_surge: { 18:1.08, 19:1.18, 20:1.25, 21:1.28, 22:1.22, 23:1.15 },
+  new_year: { 20:1.15, 21:1.22, 22:1.35, 23:1.45 },
+};
+
+function _drawHeatmap(zones, projectedZones) {
+  const canvas = document.getElementById('twin-heatmap');
+  if (!canvas) return;
+
+  // Resolve active events for hourly multipliers
+  const activeEvents = Object.keys(STATE._twinActive || {})
+    .filter(k => STATE._twinActive[k])
+    .map(k => TWIN_EVENTS[k]).filter(Boolean);
+
+  const LABEL_W = 86;
+  // Force canvas pixel dimensions from layout
+  const rect = canvas.getBoundingClientRect();
+  canvas.width  = Math.round(rect.width)  || canvas.offsetWidth  || 420;
+  canvas.height = Math.round(rect.height) || canvas.offsetHeight || 250;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const nH = 24;
+  const nZ = zones.length;
+  const cellW = (canvas.width - LABEL_W) / nH;
+  const cellH = (canvas.height - 14) / nZ;  // leave 14px for hour labels
+
+  // Peak reference: use projected if available, else baseline
+  const refPeak = projectedZones
+    ? Math.max(...projectedZones.map(z => z.peak_mw))
+    : Math.max(...zones.map(z => z.peak_mw));
+
+  // Zone-level multiplier from projectedZones (overall peak ratio)
+  const zoneRatio = {};
+  if (projectedZones) {
+    projectedZones.forEach(pz => {
+      zoneRatio[pz.zone_id] = pz.peak_mw / Math.max(pz.baseline_mw, 1);
+    });
+  }
+
+  zones.forEach((z, zi) => {
+    // Zone label
+    ctx.fillStyle = '#94a3b8';
+    const fontSize = Math.max(7, Math.min(9, Math.round(cellH * 0.38)));
+    ctx.font = `${fontSize}px Inter, system-ui, sans-serif`;
+    ctx.fillText(z.zone_name.substring(0, 11), 2, zi * cellH + cellH * 0.65);
+
+    const baseZoneRatio = zoneRatio[z.zone_id] || 1;
+
+    for (let h = 0; h < nH; h++) {
+      const hf = (z.hourly_forecast || []).find(x => x.hour === h);
+      const baseMw = hf ? hf.predicted_mw : 0;
+
+      // Compute compound hourly multiplier from all active events
+      let hourlyMult = baseZoneRatio;
+      activeEvents.forEach(ev => {
+        const mod = HEATMAP_HOURLY[ev.id];
+        if (mod && mod[h] !== undefined) hourlyMult *= mod[h];
+      });
+
+      const projMw    = baseMw * hourlyMult;
+      const intensity = Math.min(1, projMw / refPeak);
+
+      // Steeper color ramp: green at <0.4, yellow at 0.6, red at >0.8
+      let r, g, b;
+      if (intensity < 0.4) {
+        const t = intensity / 0.4;
+        r = Math.round(t * 210); g = 185; b = 30;
+      } else if (intensity < 0.7) {
+        const t = (intensity - 0.4) / 0.3;
+        r = 210; g = Math.round(185 * (1 - t * 0.5)); b = 20;
+      } else {
+        const t = (intensity - 0.7) / 0.3;
+        r = 220; g = Math.round(92 * (1 - t)); b = 20;
+      }
+      const alpha = 0.18 + intensity * 0.78;
+      ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+      ctx.fillRect(LABEL_W + h * cellW + 0.5, zi * cellH + 0.5, cellW - 1, cellH - 1);
+
+      // Highlight peak cell with border
+      if (intensity > 0.85) {
+        ctx.strokeStyle = 'rgba(239,68,68,0.7)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(LABEL_W + h * cellW + 0.5, zi * cellH + 0.5, cellW - 1, cellH - 1);
+      }
     }
-  };
-  set('wif-stress', `${stressScore}`, stressColor);
-  set('wif-stress-sub', stressLabel);
-  set('wif-peak', `${totalScenarioPeak.toFixed(1)} MW`);
-  const peakSub = peakDelta > 0
-    ? `<span class="delta-up">+${peakDelta.toFixed(1)} MW vs baseline</span>`
-    : peakDelta < 0
-      ? `<span class="delta-down">${peakDelta.toFixed(1)} MW vs baseline</span>`
-      : `<span class="delta-flat">no change</span>`;
-  const peakSubEl = document.getElementById('wif-peak-zone');
-  if (peakSubEl) peakSubEl.innerHTML = peakSub;
-  set('wif-flagged', `+${totalExtra}`, totalExtra > 0 ? '#fbbf24' : '#94a3b8');
-  set('wif-risk-zones', `${riskZones}`, riskZones >= 6 ? '#ef4444' : riskZones >= 3 ? '#f97316' : '#94a3b8');
+  });
 
-  // ── Narrative ────────────────────────────────────────────────────
-  const narEl = document.getElementById('whatif-narrative');
-  if (narEl) narEl.textContent = scenario.narrative;
+  // Hour tick labels at bottom
+  ctx.fillStyle = '#475569';
+  ctx.font = '7px Inter, system-ui';
+  [0, 3, 6, 9, 12, 15, 18, 21, 23].forEach(h => {
+    ctx.fillText(`${h}h`, LABEL_W + h * cellW + 1, canvas.height - 2);
+  });
 
-  // ── Baseline vs Scenario peak chart (grouped horizontal bars) ───
-  const ctx1 = document.getElementById('chart-whatif-peak');
-  if (ctx1) {
-    if (charts.whatifPeak) charts.whatifPeak.destroy();
-    const sortedZones = [...scenario.zones].sort((a, b) => b.peak_mw - a.peak_mw);
-    const baselineMap = Object.fromEntries(baseline.zones.map(z => [z.zone_id, z.peak_mw]));
-    const fillColors = sortedZones.map(z =>
-      z.risk_level === 'Critical' ? 'rgba(239,68,68,0.92)' :
-      z.risk_level === 'High'     ? 'rgba(249,115,22,0.92)' :
-      z.risk_level === 'Moderate' ? 'rgba(245,158,11,0.85)' : 'rgba(16,185,129,0.80)'
-    );
-    charts.whatifPeak = new Chart(ctx1, {
-      type: 'bar',
-      data: {
-        labels: sortedZones.map(z => z.zone_name),
-        datasets: [
-          {
-            label: 'Baseline',
-            data: sortedZones.map(z => baselineMap[z.zone_id] || 0),
-            backgroundColor: 'rgba(148,163,184,0.30)',
-            borderColor: 'rgba(148,163,184,0.6)',
-            borderWidth: 1,
-            borderRadius: 3,
-            barPercentage: 0.85,
-            categoryPercentage: 0.85,
-          },
-          {
-            label: 'Scenario',
-            data: sortedZones.map(z => z.peak_mw),
-            backgroundColor: fillColors,
-            borderRadius: 3,
-            barPercentage: 0.85,
-            categoryPercentage: 0.85,
-          },
-        ],
-      },
-      options: {
-        indexAxis: 'y',
-        responsive: true, maintainAspectRatio: false,
-        layout: { padding: { left: 4, right: 8, top: 6, bottom: 0 } },
-        plugins: {
-          legend: { position: 'top', labels: { color: '#94a3b8', font: { size: 10 }, boxWidth: 10, padding: 10 } },
-          tooltip: {
-            callbacks: {
-              label: (c) => {
-                const z = sortedZones[c.dataIndex];
-                if (c.datasetIndex === 0) return `Baseline: ${c.raw.toFixed(2)} MW`;
-                const delta = z.peak_mw - (baselineMap[z.zone_id] || 0);
-                return [
-                  `Scenario: ${c.raw.toFixed(2)} MW (${z.risk_level})`,
-                  `Δ ${delta > 0 ? '+' : ''}${delta.toFixed(2)} MW`,
-                ];
-              },
-            },
-          },
-        },
-        scales: {
-          x: { ticks: { color: '#8899aa', callback: v => `${v} MW`, font: { size: 10 } }, grid: { color: '#1e2d42' } },
-          y: { ticks: { color: '#cbd5e1', font: { size: 10 } }, grid: { display: false } },
-        },
-      },
+  // Vertical marker at 18h (peak window start)
+  if (activeEvents.length) {
+    ctx.strokeStyle = 'rgba(239,68,68,0.35)';
+    ctx.setLineDash([3, 3]);
+    ctx.lineWidth = 1;
+    const x18 = LABEL_W + 18 * cellW;
+    ctx.beginPath(); ctx.moveTo(x18, 0); ctx.lineTo(x18, canvas.height - 14); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(239,68,68,0.6)';
+    ctx.font = '7px Inter, system-ui';
+    ctx.fillText('18h peak', x18 + 2, 9);
+  }
+}
+
+function _renderHotspots(zones, projectedZones) {
+  const el = document.getElementById('twin-hotspots');
+  if (!el) return;
+  const PC = { Critical:'#ef4444', High:'#f97316', Moderate:'#f59e0b', Low:'#10b981' };
+  const source = projectedZones || zones.map(z=>({...z, risk_level: z.risk_level}));
+  const sorted = [...source].sort((a,b)=>b.peak_mw-a.peak_mw);
+  el.innerHTML = sorted.map(z => {
+    const pct = projectedZones ? Math.round((z.peak_mw/(zones.find(zz=>zz.zone_id===z.zone_id)?.peak_mw||z.peak_mw)-1)*100) : 0;
+    const delta = pct > 0 ? `<span style="color:#ef4444;font-weight:700">+${pct}%</span>` : pct < 0 ? `<span style="color:#10b981">-${Math.abs(pct)}%</span>` : '';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #0e1623">
+      <span style="width:8px;height:8px;border-radius:50%;background:${PC[z.risk_level]||'#64748b'};flex-shrink:0"></span>
+      <span style="flex:1;font-size:9pt;color:#cbd5e1;font-weight:600">${z.zone_name}</span>
+      <span style="font-size:8.5pt;color:#94a3b8">${z.peak_mw.toFixed(1)} MW</span>
+      ${delta}
+      <span style="font-size:7.5pt;color:${PC[z.risk_level]||'#64748b'};font-weight:700">${z.risk_level}</span>
+    </div>`;
+  }).join('');
+}
+
+function _renderSurgeChart(totalExtra, zoneExtras) {
+  const ctx = document.getElementById('chart-twin-surge');
+  if (!ctx) return;
+  if (charts.twinSurge) charts.twinSurge.destroy();
+  if (!zoneExtras.length) {
+    charts.twinSurge = new Chart(ctx, {
+      type:'bar', data:{ labels:['No scenario active'], datasets:[{data:[0],backgroundColor:'rgba(100,116,139,0.3)',borderRadius:4}] },
+      options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}},
+        scales:{ x:{ticks:{color:'#8899aa',font:{size:9}}}, y:{ticks:{color:'#8899aa',font:{size:9}},grid:{color:'#1e2d42'}} } },
     });
+    return;
+  }
+  const top8 = [...zoneExtras].sort((a,b)=>b.extra-a.extra).slice(0,8);
+  charts.twinSurge = new Chart(ctx, {
+    type:'bar',
+    data:{
+      labels: top8.map(z=>z.name),
+      datasets:[{ label:'Extra flagged meters', data:top8.map(z=>z.extra),
+        backgroundColor: top8.map(z=>z.extra>5?'rgba(239,68,68,0.80)':z.extra>2?'rgba(249,115,22,0.80)':'rgba(245,158,11,0.75)'),
+        borderRadius:4 }],
+    },
+    options:{
+      indexAxis:'y', responsive:true, maintainAspectRatio:false,
+      layout:{padding:{left:4,right:8,top:4,bottom:0}},
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{label:c=>`+${c.raw} meters flagged`}} },
+      scales:{ x:{ticks:{color:'#8899aa',font:{size:8}},grid:{color:'#1e2d42'}},
+               y:{ticks:{color:'#cbd5e1',font:{size:8}},grid:{display:false}} },
+    },
+  });
+}
+
+function _updateTwinSimulation() {
+  const active = Object.keys(STATE._twinActive||{}).filter(k=>STATE._twinActive[k]).map(k=>TWIN_EVENTS[k]).filter(Boolean);
+  const activeInterventions = Object.keys(STATE._twinIntervention||{}).filter(k=>STATE._twinIntervention[k]).map(k=>TWIN_INTERVENTIONS[k]).filter(Boolean);
+
+  const compoundBar = document.getElementById('twin-compound-bar');
+  const compLabel   = document.getElementById('twin-compound-label');
+  const compConf    = document.getElementById('twin-compound-conf');
+  const curveSub    = document.getElementById('twin-curve-sub');
+  const briefEl     = document.getElementById('twin-brief');
+  const briefConf   = document.getElementById('twin-brief-conf');
+
+  if (!active.length && !activeInterventions.length) {
+    if (compoundBar) compoundBar.style.display = 'none';
+    if (curveSub) curveSub.textContent = 'No scenario active — showing historical baseline from meter data';
+    _renderTwinBaseline();
+    const relEl = document.getElementById('twin-reliability');
+    if (relEl) relEl.innerHTML = `<div style="color:#64748b;font-size:8.5pt;padding:20px 0;text-align:center">Activate a scenario to see impact</div>`;
+    return;
   }
 
-  // ── Extra flagged meters chart ───────────────────────────────────
-  const ctx2 = document.getElementById('chart-whatif-flagged');
-  if (ctx2) {
-    if (charts.whatifFlagged) charts.whatifFlagged.destroy();
-    const sortedExtra = [...scenario.zones].sort((a, b) => b.extra_flagged - a.extra_flagged).slice(0, 10);
-    const maxExtra = Math.max(1, ...sortedExtra.map(z => z.extra_flagged));
-    charts.whatifFlagged = new Chart(ctx2, {
-      type: 'bar',
-      data: {
-        labels: sortedExtra.map(z => z.zone_name),
-        datasets: [{
-          label: 'Extra flagged',
-          data: sortedExtra.map(z => z.extra_flagged),
-          backgroundColor: sortedExtra.map(z => {
-            const r = z.extra_flagged / maxExtra;
-            if (r >= 0.7) return 'rgba(239,68,68,0.85)';
-            if (r >= 0.4) return 'rgba(249,115,22,0.85)';
-            if (r >= 0.15) return 'rgba(245,158,11,0.80)';
-            return 'rgba(139,92,246,0.65)';
-          }),
-          borderRadius: 4,
-        }],
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        layout: { padding: { left: 4, right: 8, top: 6, bottom: 0 } },
-        plugins: {
-          legend: { display: false },
-          tooltip: {
-            callbacks: { label: (c) => `+${c.raw} flagged meters · ${sortedExtra[c.dataIndex].risk_level} zone` },
-          },
-        },
-        scales: {
-          x: { ticks: { color: '#8899aa', font: { size: 9 } }, grid: { color: '#1e2d42' } },
-          y: { ticks: { color: '#8899aa', precision: 0 }, grid: { color: '#1e2d42' }, beginAtZero: true },
-        },
-      },
-    });
-  }
+  if (compoundBar) compoundBar.style.display = 'flex';
+  const allLabels = [...active.map(e=>e.name), ...activeInterventions.map(i=>`[${i.name}]`)];
+  if (compLabel) compLabel.textContent = allLabels.join(' + ');
 
-  // ── Risk distribution shift (baseline vs scenario) ──────────────
-  const ctx3 = document.getElementById('chart-whatif-risk');
-  if (ctx3) {
-    if (charts.whatifRisk) charts.whatifRisk.destroy();
-    const tally = (zones) => {
-      const t = { Critical: 0, High: 0, Moderate: 0, Low: 0 };
-      zones.forEach(z => t[z.risk_level] = (t[z.risk_level] || 0) + 1);
-      return t;
+  if (!active.length) { _renderTwinBaseline(); return; }
+
+  const sc = _computeTwinScenario(active);
+  if (!sc) return;
+
+  const { projectedZones, combined } = sc;
+  const zones = STATE.data.zoneForecast || [];
+  const hrs = Array.from({length:24},(_,i)=>i);
+
+  const baseline = hrs.map(h => zones.reduce((s,z) => {
+    const hf=(z.hourly_forecast||[]).find(x=>x.hour===h); return s+(hf?hf.predicted_mw:0);
+  }, 0));
+  const avgMulti = (combined.typeMulti.urban_core + combined.typeMulti.semi_urban + combined.typeMulti.rural_edge) / 3;
+  const projCurve = hrs.map((_,i) => parseFloat((baseline[i] * avgMulti).toFixed(1)));
+
+  // Intervention reduces the projected curve
+  const totalPeakRed = activeInterventions.reduce((s,iv)=>s+iv.peakRed, 0);
+  const afterCurve = activeInterventions.length
+    ? projCurve.map((v,h) => h>=17&&h<=22 ? parseFloat((v*(1-totalPeakRed)).toFixed(1)) : parseFloat((v*0.98).toFixed(1)))
+    : null;
+
+  const peakBefore = Math.max(...baseline);
+  const peakEvent  = Math.max(...projCurve);
+  const peakAfterI = afterCurve ? Math.max(...afterCurve) : peakEvent;
+  const peakDelta  = peakEvent - peakBefore;
+  const peakSaved  = peakEvent - peakAfterI;
+
+  const confAvg = Math.round(active.reduce((s,e)=>s+e.conf,0)/active.length);
+  if (compConf) compConf.textContent = `${confAvg}% pattern confidence`;
+  if (curveSub) curveSub.textContent = activeInterventions.length
+    ? `Event peak: ${peakEvent.toFixed(1)} MW (+${peakDelta.toFixed(1)} MW) → After intervention: ${peakAfterI.toFixed(1)} MW (−${peakSaved.toFixed(1)} MW saved)`
+    : `Projected peak: ${peakEvent.toFixed(1)} MW (+${peakDelta.toFixed(1)} MW · ${((peakDelta/peakBefore)*100).toFixed(1)}% above baseline)`;
+
+  _drawTwinCurve(baseline, projCurve, active, afterCurve, activeInterventions);
+  _drawHeatmap(zones, projectedZones);
+  _renderHotspots(zones, projectedZones);
+
+  const zoneExtras = projectedZones.map(z=>({ name:z.zone_name, extra:z.extra_flagged||0 }));
+  const totalExtra = zoneExtras.reduce((s,z)=>s+z.extra,0);
+  const totalFlagRed = activeInterventions.reduce((s,iv)=>s+iv.flagRed,0);
+  const extraAfter  = activeInterventions.length ? Math.round(totalExtra*(1-totalFlagRed)) : totalExtra;
+  _renderSurgeChart(totalExtra, zoneExtras);
+
+  // Reliability impact score table
+  const critBefore  = zones.filter(z=>z.risk_level==='Critical').length;
+  const critEvent   = projectedZones.filter(z=>z.risk_level==='Critical').length;
+  const critAfter   = activeInterventions.length ? Math.max(critBefore, Math.round(critEvent*(1-totalPeakRed*1.5))) : critEvent;
+  const dtOverBefore = Math.round(critBefore*2.8);
+  const dtOverEvent  = Math.round(critEvent*3.4);
+  const dtOverAfter  = activeInterventions.length ? Math.round(dtOverEvent*(1-totalPeakRed)) : dtOverEvent;
+  const relEl = document.getElementById('twin-reliability');
+  if (relEl) {
+    const rkColor = (a,b,c,better='low') => {
+      const best = better==='low' ? Math.min(a,b,c) : Math.max(a,b,c);
+      return v => v===best ? '#10b981' : v===Math.max(a,b,c)&&better==='low' ? '#ef4444' : '#f59e0b';
     };
-    const tBase = tally(baseline.zones);
-    const tScen = tally(scenario.zones);
-    const levels = ['Critical', 'High', 'Moderate', 'Low'];
-    charts.whatifRisk = new Chart(ctx3, {
-      type: 'bar',
-      data: {
-        labels: levels,
-        datasets: [
-          {
-            label: 'Baseline',
-            data: levels.map(l => tBase[l]),
-            backgroundColor: 'rgba(148,163,184,0.40)',
-            borderColor: 'rgba(148,163,184,0.6)',
-            borderWidth: 1,
-          },
-          {
-            label: 'Scenario',
-            data: levels.map(l => tScen[l]),
-            backgroundColor: ['rgba(239,68,68,0.85)','rgba(249,115,22,0.85)','rgba(245,158,11,0.80)','rgba(16,185,129,0.75)'],
-          },
-        ],
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        layout: { padding: { left: 4, right: 8, top: 6, bottom: 0 } },
-        plugins: { legend: { position: 'top', labels: { color: '#94a3b8', font: { size: 10 }, boxWidth: 10, padding: 10 } } },
-        scales: {
-          x: { ticks: { color: '#cbd5e1', font: { size: 11, weight: '600' } }, grid: { display: false } },
-          y: { ticks: { color: '#8899aa', precision: 0 }, grid: { color: '#1e2d42' }, beginAtZero: true },
-        },
-      },
-    });
-  }
-
-  // ── Zone status table (biggest movers) ───────────────────────────
-  const tbl = document.getElementById('whatif-zone-table');
-  if (tbl) {
-    const rowsSorted = [...scenario.zones]
-      .map(z => ({
-        ...z,
-        baseline: (baseline.zones.find(b => b.zone_id === z.zone_id) || {}).peak_mw || 0,
-      }))
-      .map(z => ({ ...z, delta: z.peak_mw - z.baseline }))
-      .sort((a, b) => b.delta - a.delta);
-
-    tbl.innerHTML = `
-      <table class="dt">
-        <thead><tr>
-          <th>Zone</th><th class="num">Baseline</th><th class="num">Scenario</th>
-          <th class="num">Δ MW</th><th>Risk</th><th class="num">+Flagged</th>
+    const cRisk = ['Low','Moderate','High','Critical'];
+    const riskBefore = cRisk[Math.min(3,critBefore)];
+    const riskEvent  = cRisk[Math.min(3,critEvent+1)];
+    const riskAfter  = activeInterventions.length ? cRisk[Math.min(3,critAfter)] : riskEvent;
+    const RC = (v) => v==='Critical'?'#ef4444':v==='High'?'#f97316':v==='Moderate'?'#f59e0b':'#10b981';
+    relEl.innerHTML = `
+      <table style="width:100%;border-collapse:collapse;font-size:8pt">
+        <thead><tr style="color:#64748b;font-size:7.5pt;border-bottom:1px solid #1e2d42">
+          <th style="padding:4px 6px;text-align:left">Metric</th>
+          <th style="padding:4px 6px;text-align:center">Baseline</th>
+          <th style="padding:4px 6px;text-align:center;color:#f59e0b">+ Event</th>
+          ${activeInterventions.length?`<th style="padding:4px 6px;text-align:center;color:#22d3ee">+ Fix</th>`:''}
         </tr></thead>
         <tbody>
-        ${rowsSorted.map(z => `
-          <tr>
-            <td><b>${z.zone_name}</b></td>
-            <td class="num">${z.baseline.toFixed(1)}</td>
-            <td class="num"><b>${z.peak_mw.toFixed(1)}</b></td>
-            <td class="num"><span class="${z.delta > 0 ? 'delta-up' : z.delta < 0 ? 'delta-down' : 'delta-flat'}">${z.delta > 0 ? '+' : ''}${z.delta.toFixed(1)}</span></td>
-            <td><span class="risk-badge risk-${z.risk_level.toLowerCase()}">${z.risk_level}</span></td>
-            <td class="num">${z.extra_flagged > 0 ? '<b style="color:#fbbf24">+' + z.extra_flagged + '</b>' : '–'}</td>
-          </tr>`).join('')}
+          <tr style="border-bottom:1px solid #0a1220"><td style="padding:4px 6px;color:#94a3b8">DT Overloads</td>
+            <td style="text-align:center;color:#10b981">${dtOverBefore}</td>
+            <td style="text-align:center;color:#ef4444">${dtOverEvent}</td>
+            ${activeInterventions.length?`<td style="text-align:center;color:#22d3ee">${dtOverAfter}</td>`:''}
+          </tr>
+          <tr style="border-bottom:1px solid #0a1220"><td style="padding:4px 6px;color:#94a3b8">Critical Zones</td>
+            <td style="text-align:center;color:#10b981">${critBefore}</td>
+            <td style="text-align:center;color:#ef4444">${critEvent}</td>
+            ${activeInterventions.length?`<td style="text-align:center;color:#22d3ee">${critAfter}</td>`:''}
+          </tr>
+          <tr style="border-bottom:1px solid #0a1220"><td style="padding:4px 6px;color:#94a3b8">Extra Flagged</td>
+            <td style="text-align:center;color:#10b981">0</td>
+            <td style="text-align:center;color:#ef4444">+${totalExtra}</td>
+            ${activeInterventions.length?`<td style="text-align:center;color:#22d3ee">+${extraAfter}</td>`:''}
+          </tr>
+          <tr><td style="padding:4px 6px;color:#94a3b8">Outage Risk</td>
+            <td style="text-align:center;color:${RC(riskBefore)};font-weight:700">${riskBefore}</td>
+            <td style="text-align:center;color:${RC(riskEvent)};font-weight:700">${riskEvent}</td>
+            ${activeInterventions.length?`<td style="text-align:center;color:${RC(riskAfter)};font-weight:700">${riskAfter}</td>`:''}
+          </tr>
         </tbody>
       </table>`;
   }
 
-  refreshIcons();
+  // AI brief
+  const critZones = projectedZones.filter(z=>z.risk_level==='Critical').map(z=>z.zone_name);
+  const highZones = projectedZones.filter(z=>z.risk_level==='High').map(z=>z.zone_name);
+  const eventNames = active.map(e=>e.name).join(' + ');
+  const sourceLine = active.map(e=>`<span style="color:#475569;font-size:7.5pt">↳ ${e.source}</span>`).join('<br>');
+  const interventionLine = activeInterventions.length
+    ? `<p style="margin-bottom:5px;color:#22d3ee"><i>Intervention applied: ${activeInterventions.map(i=>i.name).join(' + ')} — projected to reduce peak by ${(peakSaved).toFixed(1)} MW and cut flagged surge by ${Math.round(totalFlagRed*100)}%.</i></p>` : '';
+  if (briefEl) briefEl.innerHTML = `
+    <p style="color:#f1f5f9;margin-bottom:5px">Under <b>${eventNames}</b>, the twin projects <b>${peakEvent.toFixed(1)} MW peak</b> — <b style="color:#f59e0b">+${peakDelta.toFixed(1)} MW (+${((peakDelta/peakBefore)*100).toFixed(1)}%)</b> above baseline.</p>
+    ${critZones.length?`<p style="margin-bottom:4px"><span style="color:#ef4444">▲ Critical:</span> <b>${critZones.join(', ')}</b> — DT loading >90%. Activate load shedding protocol.</p>`:''}
+    ${highZones.length?`<p style="margin-bottom:4px"><span style="color:#f97316">▲ High:</span> <b>${highZones.join(', ')}</b> — inspection teams on standby.</p>`:''}
+    <p style="margin-bottom:5px"><span style="color:#fbbf24">+${totalExtra} meters</span> projected to flag under demand surge.</p>
+    ${interventionLine}
+    <div style="border-top:1px solid #1e2d42;padding-top:5px;margin-top:5px">${sourceLine}</div>`;
+  if (briefConf) briefConf.textContent = `${confAvg}% pattern confidence`;
+
+  // Map update
+  if (mlMap && STATE.localView === 'whatif') {
+    const PC = { Critical:'#ef4444', High:'#f97316', Moderate:'#f59e0b', Low:'#10b981' };
+    const expr = ['match', ['get', 'zone_id']];
+    projectedZones.forEach(z=>{ expr.push(z.zone_id, PC[z.risk_level]||'#64748b'); });
+    expr.push('#64748b');
+    try { mlMap.setPaintProperty('zone-bounds-fill','fill-color',expr); mlMap.setPaintProperty('zone-bounds-fill','fill-opacity',0.40); } catch(e){}
+  }
 }
+
+function _bindTwinEvents() {
+  // Event scenario toggles
+  document.querySelectorAll('.twin-event-card:not(.twin-intervention-card)').forEach(card => {
+    card.addEventListener('click', () => {
+      const id = card.dataset.event;
+      STATE._twinActive = STATE._twinActive || {};
+      STATE._twinActive[id] = !STATE._twinActive[id];
+      card.classList.toggle('twin-event-active', !!STATE._twinActive[id]);
+      _updateTwinSimulation();
+    });
+  });
+  // Intervention toggles
+  document.querySelectorAll('.twin-intervention-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const id = card.dataset.intervention;
+      STATE._twinIntervention = STATE._twinIntervention || {};
+      STATE._twinIntervention[id] = !STATE._twinIntervention[id];
+      card.classList.toggle('twin-event-active', !!STATE._twinIntervention[id]);
+      _updateTwinSimulation();
+    });
+  });
+  const clearBtn = document.getElementById('twin-clear-btn');
+  if (clearBtn) clearBtn.addEventListener('click', () => {
+    STATE._twinActive = {}; STATE._twinIntervention = {};
+    document.querySelectorAll('.twin-event-card').forEach(c=>c.classList.remove('twin-event-active'));
+    _updateTwinSimulation();
+  });
+}
+
+// Keep updateWhatIfScenario as a no-op stub (called from slider binds that no longer exist)
+function updateWhatIfScenario() {}
 
 // ── Tampering / Theft Analytics Dashboard ─────────────────────────────────
 function renderTamperingDashboard() {
@@ -3449,7 +4103,7 @@ function bindEvents() {
   });
 
   // What-If sliders (live re-projection)
-  ['whatif-heat', 'whatif-ac', 'whatif-festival'].forEach(id => {
+  ['whatif-heat', 'whatif-ac', 'whatif-festival', 'whatif-ev', 'whatif-solar'].forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener('input', updateWhatIfScenario);
@@ -3461,8 +4115,11 @@ function bindEvents() {
     const h = document.getElementById('whatif-heat');     if (h) h.value = 0;
     const a = document.getElementById('whatif-ac');       if (a) a.value = 0;
     const f = document.getElementById('whatif-festival'); if (f) f.checked = false;
+    const e = document.getElementById('whatif-ev');       if (e) e.value = 0;
+    const s = document.getElementById('whatif-solar');    if (s) s.value = 0;
     updateWhatIfScenario();
   });
+
 
   // Tactical overlay: density toggle (Meter Level / Zone Level)
   document.querySelectorAll('.density-btn').forEach(btn => {
@@ -3658,6 +4315,1129 @@ async function boot() {
 }
 
 window.addEventListener('DOMContentLoaded', boot);
+
+// ── Revenue Flow Sankey + Recovery Panel ──────────────────────────────────────
+function renderRevenuePanel(zones) {
+  // Aggregate AT&C for the 12 zones
+  const avgAtc  = zones.reduce((s, z) => s + (z.atc_pct || 12), 0) / zones.length;
+  const techLoss = 4.8;                            // technical (wire) loss %
+  const commLoss = Math.max(0, avgAtc - techLoss); // commercial (theft+billing) loss %
+  const collected = 100 - avgAtc;
+  const billingGap = 1.8;                          // bills issued but not collected
+  const paidRevenue = collected - billingGap;
+
+  // Evidence-based monthly ₹ figures
+  const evidence = STATE.data.evidence || [];
+  const totalMonthlyLoss = evidence.reduce((s, e) => s + (e.est_revenue_loss_inr || e.monthly_loss_inr || 0), 0);
+  const recoverable = Math.round(totalMonthlyLoss * 0.72);  // 72% recoverable within quarter
+  const atcDrop = (commLoss * 0.45).toFixed(1);            // resolving flagged cases
+  const payback  = Math.round(55 / Math.max(totalMonthlyLoss / 1e5, 0.1));  // inspection cost / monthly save
+
+  // KPI strip
+  const strip = document.getElementById('rev-kpi-strip');
+  const fmt = v => v >= 1e7 ? `₹${(v/1e7).toFixed(1)}Cr` : v >= 1e5 ? `₹${(v/1e5).toFixed(1)}L` : `₹${(v/1e3).toFixed(0)}K`;
+  if (strip) strip.innerHTML = `
+    <div class="kpi-card kpi-red" style="padding:10px 12px">
+      <div class="kpi-label" style="font-size:8pt">Monthly Loss</div>
+      <div class="kpi-value" style="font-size:16pt">${fmt(totalMonthlyLoss)}</div>
+      <div class="kpi-sub">across flagged meters</div>
+    </div>
+    <div class="kpi-card kpi-green" style="padding:10px 12px">
+      <div class="kpi-label" style="font-size:8pt">Recoverable</div>
+      <div class="kpi-value" style="font-size:16pt">${fmt(recoverable)}</div>
+      <div class="kpi-sub">this quarter · 72% of loss</div>
+    </div>
+    <div class="kpi-card kpi-blue" style="padding:10px 12px">
+      <div class="kpi-label" style="font-size:8pt">AT&C Drop</div>
+      <div class="kpi-value" style="font-size:16pt">−${atcDrop}pp</div>
+      <div class="kpi-sub">if Critical cases resolved</div>
+    </div>
+    <div class="kpi-card kpi-amber" style="padding:10px 12px">
+      <div class="kpi-label" style="font-size:8pt">Payback</div>
+      <div class="kpi-value" style="font-size:16pt">${payback} mo</div>
+      <div class="kpi-sub">inspection cost ÷ monthly save</div>
+    </div>`;
+
+  // Revenue recovery bar (Critical/High/Moderate breakdown)
+  const byTier = { Critical: 0, High: 0, Moderate: 0 };
+  evidence.forEach(e => { const v = e.est_revenue_loss_inr || e.monthly_loss_inr || 0; if (byTier[e.severity] !== undefined) byTier[e.severity] += v; });
+  const ctx2 = document.getElementById('chart-rev-recovery');
+  if (ctx2) {
+    if (charts.revRecovery) charts.revRecovery.destroy();
+    charts.revRecovery = new Chart(ctx2, {
+      type: 'bar',
+      data: {
+        labels: ['Critical', 'High', 'Moderate'],
+        datasets: [{ label: 'Monthly Loss (₹)', data: [byTier.Critical, byTier.High, byTier.Moderate],
+          backgroundColor: ['rgba(239,68,68,0.85)','rgba(249,115,22,0.80)','rgba(245,158,11,0.75)'], borderRadius: 5 }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        layout: { padding: { left: 4, right: 8, top: 4, bottom: 0 } },
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => fmt(c.raw) } } },
+        scales: {
+          x: { ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { display: false } },
+          y: { ticks: { color: '#8899aa', callback: v => fmt(v), font: { size: 9 } }, grid: { color: '#1e2d42' } },
+        },
+      },
+    });
+  }
+
+  // Sankey: Energy → Losses → Revenue
+  const ctx1 = document.getElementById('chart-sankey');
+  if (!ctx1) return;
+  if (charts.sankey) charts.sankey.destroy();
+
+  const nodeColors = {
+    'Energy\nGenerated': '#3b82f6',
+    'Technical\nLoss':   '#64748b',
+    'Commercial\nLoss':  '#ef4444',
+    'Billing\nGap':      '#f97316',
+    'Revenue\nCollected':'#10b981',
+    'Energy\nBilled':    '#8b5cf6',
+  };
+  const getColor = (name) => nodeColors[name] || '#94a3b8';
+
+  charts.sankey = new Chart(ctx1, {
+    type: 'sankey',
+    data: {
+      datasets: [{
+        data: [
+          { from: 'Energy\nGenerated', to: 'Technical\nLoss',    flow: parseFloat(techLoss.toFixed(1)) },
+          { from: 'Energy\nGenerated', to: 'Commercial\nLoss',   flow: parseFloat(commLoss.toFixed(1)) },
+          { from: 'Energy\nGenerated', to: 'Energy\nBilled',     flow: parseFloat((100 - techLoss).toFixed(1)) },
+          { from: 'Energy\nBilled',    to: 'Billing\nGap',       flow: parseFloat(billingGap.toFixed(1)) },
+          { from: 'Energy\nBilled',    to: 'Revenue\nCollected', flow: parseFloat(paidRevenue.toFixed(1)) },
+        ],
+        colorFrom: (c) => getColor(c.dataset.data[c.dataIndex].from),
+        colorTo:   (c) => getColor(c.dataset.data[c.dataIndex].to),
+        colorMode: 'gradient',
+        labels: {
+          'Energy\nGenerated': 'Energy Generated',
+          'Technical\nLoss':   `Technical Loss ${techLoss.toFixed(1)}%`,
+          'Commercial\nLoss':  `Commercial Loss ${commLoss.toFixed(1)}%`,
+          'Energy\nBilled':    `Billed ${(100-techLoss).toFixed(1)}%`,
+          'Billing\nGap':      `Billing Gap ${billingGap}%`,
+          'Revenue\nCollected':`Collected ${paidRevenue.toFixed(1)}%`,
+        },
+        color: '#cbd5e1',
+        borderWidth: 0,
+        nodeWidth: 14,
+        nodePadding: 18,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      layout: { padding: { left: 6, right: 6, top: 8, bottom: 8 } },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (c) => {
+              const d = c.dataset.data[c.dataIndex];
+              return `${d.from.replace('\n',' ')} → ${d.to.replace('\n',' ')}: ${d.flow.toFixed(1)}%`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+// ── Shimmer skeleton helper ───────────────────────────────────────────────────
+function _withShimmer(panelId, skeletonHtml, renderFn, delay) {
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
+  panel.innerHTML = skeletonHtml;
+  setTimeout(() => {
+    if (document.getElementById(panelId)) renderFn();
+  }, delay || 350);
+}
+
+function _deployShimmerHtml() {
+  const kpi  = `<div class="kpi-card" style="height:72px"><div class="shimmer-block" style="height:14px;width:55%;margin-bottom:8px"></div><div class="shimmer-block" style="height:22px;width:40%"></div></div>`;
+  const row  = `<tr><td colspan="6" style="padding:7px 8px"><div class="shimmer-block" style="height:13px;width:${60+Math.random()*30|0}%"></div></td></tr>`;
+  return `
+    <section class="kpi-strip local-kpi-strip">${kpi.repeat(4)}</section>
+    <section class="panel panel-full" style="padding:14px 16px">
+      <div class="shimmer-block" style="height:12px;width:220px;margin-bottom:10px"></div>
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px">
+        ${Array(5).fill(`<div><div class="shimmer-block" style="height:10px;margin-bottom:6px"></div><div class="shimmer-block" style="height:6px"></div></div>`).join('')}
+      </div>
+    </section>
+    <section class="panel-row">
+      <div class="panel" style="flex:1.1">
+        <div class="shimmer-block" style="height:12px;width:180px;margin-bottom:10px"></div>
+        <div class="shimmer-block" style="height:310px"></div>
+      </div>
+      <div class="panel" style="flex:1">
+        <div class="shimmer-block" style="height:12px;width:140px;margin-bottom:10px"></div>
+        <div class="shimmer-block" style="height:240px;margin-bottom:8px"></div>
+        <div class="shimmer-block" style="height:60px"></div>
+      </div>
+    </section>
+    <section class="panel-row">
+      <div class="panel" style="flex:1">
+        <div class="shimmer-block" style="height:12px;width:160px;margin-bottom:10px"></div>
+        <div class="shimmer-block" style="height:200px"></div>
+      </div>
+      <div class="panel" style="flex:1">
+        <div class="shimmer-block" style="height:12px;width:160px;margin-bottom:10px"></div>
+        <div class="shimmer-block" style="height:200px"></div>
+      </div>
+    </section>`;
+}
+
+function _todShimmerHtml() {
+  const kpi = `<div class="kpi-card" style="height:72px"><div class="shimmer-block" style="height:12px;width:60%;margin-bottom:8px"></div><div class="shimmer-block" style="height:22px;width:40%"></div></div>`;
+  const ctrl = Array(5).fill(`<div style="margin-bottom:10px"><div class="shimmer-block" style="height:10px;width:70%;margin-bottom:5px"></div><div class="shimmer-block" style="height:6px"></div></div>`).join('');
+  return `
+    <section class="kpi-strip local-kpi-strip">${kpi.repeat(4)}</section>
+    <section class="panel-row" style="align-items:stretch">
+      <div class="panel" style="flex:0 0 280px">
+        <div class="shimmer-block" style="height:28px;margin-bottom:10px"></div>
+        ${ctrl}
+        <div class="shimmer-block" style="height:80px;margin-top:8px"></div>
+      </div>
+      <div class="panel" style="flex:1">
+        <div class="shimmer-block" style="height:12px;width:200px;margin-bottom:10px"></div>
+        <div class="shimmer-block" style="height:280px;margin-bottom:12px"></div>
+        <div class="shimmer-block" style="height:130px"></div>
+      </div>
+    </section>
+    <section class="panel-row">
+      <div class="panel" style="flex:1.2"><div class="shimmer-block" style="height:200px"></div></div>
+      <div class="panel" style="flex:0.9"><div class="shimmer-block" style="height:200px"></div></div>
+    </section>`;
+}
+
+// ── ToD Pricing — Demand Shaping & Grid Balancing Simulation ─────────────────
+
+// Base tariff ₹/kWh per hour (flat ₹6.5 is the reference)
+const TOD_BASE_TARIFF = [3.5,3.5,3.5,3.5,3.5,3.5, 6.5,7.0,7.0,7.0, 6.5,6.5,6.5,6.5,6.5,6.5,6.5, 8.5,9.5,9.5,9.5,9.5, 7.0,6.5];
+const TOD_FLAT = 6.5;
+
+// Demand elasticity by consumer segment (price increase → demand reduction)
+const TOD_ELASTICITY = { residential:-0.12, commercial:-0.20, industrial:-0.28, ev:-0.45 };
+// System-wide share of each segment
+const TOD_SHARE = { residential:0.50, commercial:0.28, industrial:0.17, ev:0.05 };
+// Segment colors
+const TOD_SEG_COLOR = { residential:'rgba(59,130,246,0.82)', commercial:'rgba(168,85,247,0.82)', industrial:'rgba(245,158,11,0.82)', ev:'rgba(16,185,129,0.85)' };
+
+function computeToDScenario(settings) {
+  const zones = STATE.data.zoneForecast || [];
+  const hrs = Array.from({length:24}, (_,i) => i);
+
+  // Aggregate system baseline (sum all zones)
+  const baseline = hrs.map(h => zones.reduce((s,z) => {
+    const hf = (z.hourly_forecast||[]).find(x=>x.hour===h);
+    return s + (hf ? hf.predicted_mw : 0);
+  }, 0));
+
+  // Solar generation curve (normalised bell shape around noon, scaled to 20% of baseline peak)
+  const peakBase = Math.max(...baseline);
+  const solar = hrs.map(h => {
+    if (h < 6 || h > 18) return 0;
+    return parseFloat((Math.sin(Math.PI*(h-6)/12) * peakBase * 0.18 * settings.solarPenetration).toFixed(2));
+  });
+
+  // Effective tariff after scenario adjustments
+  const tariff = TOD_BASE_TARIFF.map((t,h) => {
+    if (h>=17 && h<=21) return parseFloat((t * settings.peakMultiplier).toFixed(2));
+    if (h>=10 && h<=15) return parseFloat((t * (1 - settings.solarDiscount * 0.3)).toFixed(2));
+    return t;
+  });
+
+  // Price delta from flat
+  const priceDelta = tariff.map(t => (t - TOD_FLAT) / TOD_FLAT);
+
+  // Weighted avg elasticity across all segments, scaled by response strength
+  const weightedE = Object.keys(TOD_ELASTICITY).reduce((s,seg) =>
+    s + TOD_SHARE[seg] * TOD_ELASTICITY[seg], 0) * settings.responseStrength;
+
+  // Demand per segment (with ToD shift)
+  const segments = {};
+  Object.keys(TOD_SHARE).forEach(seg => {
+    const e = TOD_ELASTICITY[seg] * settings.responseStrength;
+    // EVs: also shift more based on EV adoption level
+    const evBoost = seg === 'ev' ? (1 + settings.evAdoption * 0.8) : 1;
+    segments[seg] = hrs.map((h, i) => {
+      const segBase = baseline[i] * TOD_SHARE[seg];
+      const shift = segBase * priceDelta[i] * e * evBoost;
+      return Math.max(0, parseFloat((segBase + shift).toFixed(2)));
+    });
+  });
+
+  // Total after-ToD curve = sum of segments
+  const withTod = hrs.map(h => Object.values(segments).reduce((s,arr)=>s+arr[h],0));
+
+  // KPIs
+  const peakBefore = Math.max(...baseline);
+  const peakAfter  = Math.max(...withTod);
+  const peakRedPct = ((peakBefore-peakAfter)/peakBefore*100).toFixed(1);
+  const procSaving  = parseFloat(((peakBefore-peakAfter)*0.85*365*1.5/1e7).toFixed(2)); // ₹Cr/yr at ₹1.5L/MW
+  const dtStressRed = parseFloat((parseFloat(peakRedPct)*1.6).toFixed(1));
+  const evShiftedMwh = parseFloat((baseline.reduce((s,v,h)=>h>=17&&h<=21?s+(v*TOD_SHARE.ev*(1-(-TOD_ELASTICITY.ev*settings.responseStrength*0.5))):s,0)*settings.evAdoption).toFixed(1));
+  const energyBalance = parseFloat(((baseline.reduce((a,b)=>a+b,0)-withTod.reduce((a,b)=>a+b,0))/baseline.reduce((a,b)=>a+b,0)*100).toFixed(2));
+
+  return { baseline, withTod, tariff, solar, segments, peakRedPct, procSaving, dtStressRed, evShiftedMwh, energyBalance };
+}
+
+function renderToDView() {
+  if (!STATE.data.zoneForecast.length) return;
+  _withShimmer('lview-tod', _todShimmerHtml(), _renderToDFull, 380);
+}
+
+function _renderToDFull() {
+  STATE._todSettings = {
+    peakMultiplier: 1.4,
+    solarDiscount:  0.5,
+    evAdoption:     0.25,
+    responseStrength: 1.0,
+    solarPenetration: 0.5,
+  };
+
+  const panel = document.getElementById('lview-tod');
+  if (!panel) return;
+
+  panel.innerHTML = `
+    <!-- KPI strip -->
+    <section class="kpi-strip local-kpi-strip" id="tod-kpi-strip">
+      <div class="kpi-card kpi-green">
+        <div class="kpi-label">Peak Demand Reduction</div>
+        <div class="kpi-value" id="tod-kpi-peak">–</div>
+        <div class="kpi-sub">evening peak shaved</div>
+      </div>
+      <div class="kpi-card kpi-blue">
+        <div class="kpi-label">Procurement Savings</div>
+        <div class="kpi-value" id="tod-kpi-proc">–</div>
+        <div class="kpi-sub">₹Cr/yr · reduced peak purchase</div>
+      </div>
+      <div class="kpi-card kpi-amber">
+        <div class="kpi-label">Transformer Stress ↓</div>
+        <div class="kpi-value" id="tod-kpi-dt">–</div>
+        <div class="kpi-sub">overload probability reduction</div>
+      </div>
+      <div class="kpi-card" style="border-color:#10b981">
+        <div class="kpi-label">EV Load Shifted</div>
+        <div class="kpi-value" id="tod-kpi-ev" style="color:#34d399">–</div>
+        <div class="kpi-sub">MWh moved to off-peak</div>
+      </div>
+    </section>
+
+    <!-- Main: controls left + load curve right -->
+    <section class="panel-row" style="align-items:stretch">
+
+      <!-- LEFT: Tariff + Scenario Controls -->
+      <div class="panel" style="flex:0 0 280px;display:flex;flex-direction:column;gap:12px">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="sliders-horizontal"></i> Tariff Scenario</span>
+          <span class="panel-sub">adjust — curves update live</span>
+        </div>
+
+        <!-- Tariff band visual -->
+        <div id="tod-tariff-bands" style="display:flex;height:28px;border-radius:6px;overflow:hidden;gap:1px"></div>
+        <div style="display:flex;justify-content:space-between;font-size:7.5pt;color:#64748b;margin-top:-8px">
+          <span>12AM</span><span>6AM</span><span>12PM</span><span>6PM</span><span>12AM</span>
+        </div>
+
+        <!-- Tariff legend -->
+        <div style="display:flex;gap:10px;flex-wrap:wrap;font-size:8pt">
+          <span style="color:#10b981">■ Off-peak ₹3.5</span>
+          <span style="color:#f59e0b">■ Mid ₹6.5</span>
+          <span style="color:#f97316">■ Morning ₹7</span>
+          <span style="color:#ef4444">■ Peak ₹8.5+</span>
+          <span style="color:#22d3ee">■ Solar ₹4–5.5</span>
+        </div>
+
+        <div style="border-top:1px solid #1e2d42;padding-top:10px;display:flex;flex-direction:column;gap:10px">
+
+          <div class="tod-sc-item">
+            <label class="tod-sc-label"><i data-lucide="trending-up"></i> Peak tariff multiplier <span class="tod-sc-val" id="tod-peak-val">×1.4</span></label>
+            <input type="range" class="deploy-sc-range" id="tod-peak" min="100" max="200" step="10" value="140">
+            <div class="deploy-sc-ticks"><span>×1.0</span><span>×1.5</span><span>×2.0</span></div>
+          </div>
+
+          <div class="tod-sc-item">
+            <label class="tod-sc-label"><i data-lucide="sun"></i> Solar hour discount <span class="tod-sc-val" id="tod-solar-val">50%</span></label>
+            <input type="range" class="deploy-sc-range" id="tod-solar" min="0" max="80" step="10" value="50">
+            <div class="deploy-sc-ticks"><span>0%</span><span>40%</span><span>80%</span></div>
+          </div>
+
+          <div class="tod-sc-item">
+            <label class="tod-sc-label"><i data-lucide="car"></i> EV adoption level <span class="tod-sc-val" id="tod-ev-val">25%</span></label>
+            <input type="range" class="deploy-sc-range" id="tod-ev" min="0" max="60" step="5" value="25">
+            <div class="deploy-sc-ticks"><span>0%</span><span>30%</span><span>60%</span></div>
+          </div>
+
+          <div class="tod-sc-item">
+            <label class="tod-sc-label"><i data-lucide="users"></i> Consumer response <span class="tod-sc-val" id="tod-resp-val">100%</span></label>
+            <input type="range" class="deploy-sc-range" id="tod-resp" min="20" max="150" step="10" value="100">
+            <div class="deploy-sc-ticks"><span>Low</span><span>Med</span><span>High</span></div>
+          </div>
+
+          <div class="tod-sc-item">
+            <label class="tod-sc-label"><i data-lucide="panel-top"></i> Solar penetration <span class="tod-sc-val" id="tod-sp-val">50%</span></label>
+            <input type="range" class="deploy-sc-range" id="tod-sp" min="0" max="100" step="10" value="50">
+            <div class="deploy-sc-ticks"><span>0%</span><span>50%</span><span>100%</span></div>
+          </div>
+        </div>
+
+        <!-- Consumer bill impact -->
+        <div style="border-top:1px solid #1e2d42;padding-top:10px;font-size:8.5pt">
+          <div style="color:#64748b;font-size:7.5pt;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px">Consumer Bill Impact</div>
+          <div id="tod-bill-table"></div>
+        </div>
+      </div>
+
+      <!-- RIGHT: Main load curve -->
+      <div class="panel" style="flex:1">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="activity"></i> Grid Load Profile — Before vs After ToD</span>
+          <span class="panel-sub">system aggregate MW · live response to scenario controls</span>
+        </div>
+        <div class="chart-wrap" style="height:280px"><canvas id="chart-tod-curve"></canvas></div>
+        <div style="margin-top:6px">
+          <div class="panel-header" style="margin-top:8px">
+            <span class="panel-title" style="font-size:9pt"><i data-lucide="sun"></i> Solar Generation Overlay</span>
+            <span class="panel-sub">solar production vs demand curves</span>
+          </div>
+          <div class="chart-wrap" style="height:130px"><canvas id="chart-tod-solar"></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Bottom: segment stacked + procurement -->
+    <section class="panel-row">
+      <div class="panel" style="flex:1.2">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="layers"></i> Demand by Consumer Segment — After ToD</span>
+          <span class="panel-sub">stacked MW · residential · commercial · industrial · EV</span>
+        </div>
+        <div class="chart-wrap" style="height:200px"><canvas id="chart-tod-segments"></canvas></div>
+      </div>
+      <div class="panel" style="flex:0.9">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="bar-chart-2"></i> Peak vs Off-Peak Procurement</span>
+          <span class="panel-sub">₹L/day · expensive peak purchase reduction</span>
+        </div>
+        <div class="chart-wrap" style="height:200px"><canvas id="chart-tod-procurement"></canvas></div>
+      </div>
+    </section>`;
+
+  refreshIcons();
+  _renderTodTariffBands(STATE._todSettings);
+  _updateToDScenario();
+  _bindToDSliders();
+}
+
+function _renderTodTariffBands(settings) {
+  const el = document.getElementById('tod-tariff-bands');
+  if (!el) return;
+  const tariff = TOD_BASE_TARIFF.map((t,h) => {
+    if (h>=17&&h<=21) return t * settings.peakMultiplier;
+    if (h>=10&&h<=15) return t * (1 - settings.solarDiscount * 0.3);
+    return t;
+  });
+  const maxT = Math.max(...tariff);
+  const getColor = (t, h) => {
+    if (h>=10&&h<=15 && settings.solarDiscount>0.3) return '#22d3ee';
+    if (t <= 4) return '#10b981';
+    if (t <= 6.6) return '#f59e0b';
+    if (t <= 7.5) return '#f97316';
+    return '#ef4444';
+  };
+  el.innerHTML = tariff.map((t,h) =>
+    `<div title="${String(h).padStart(2,'0')}:00 · ₹${t.toFixed(1)}/kWh" style="flex:1;background:${getColor(t,h)};opacity:${0.5+t/maxT*0.5}"></div>`
+  ).join('');
+}
+
+function _updateToDScenario() {
+  const s = STATE._todSettings;
+  const sc = computeToDScenario(s);
+  const hl = Array.from({length:24},(_,i)=>`${String(i).padStart(2,'0')}:00`);
+
+  // KPIs
+  const set = (id, v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
+  set('tod-kpi-peak',  `${sc.peakRedPct}%`);
+  set('tod-kpi-proc',  `₹${sc.procSaving} Cr`);
+  set('tod-kpi-dt',    `${sc.dtStressRed}%`);
+  set('tod-kpi-ev',    `${sc.evShiftedMwh} MWh`);
+
+  // Bill impact table
+  const billEl = document.getElementById('tod-bill-table');
+  if (billEl) {
+    const BILL = [
+      { seg:'Residential', icon:'🏠', change: sc.energyBalance > 0 ? `-${(sc.energyBalance*0.4).toFixed(1)}%` : '±0%', color:'#10b981' },
+      { seg:'Commercial',  icon:'🏢', change:`-${(parseFloat(sc.peakRedPct)*0.6).toFixed(1)}%`, color:'#3b82f6' },
+      { seg:'Industrial',  icon:'🏭', change:`-${(parseFloat(sc.peakRedPct)*0.9).toFixed(1)}%`, color:'#f59e0b' },
+      { seg:'EV Owner',    icon:'🚗', change:`-${(s.evAdoption*18).toFixed(0)}%`, color:'#10b981' },
+    ];
+    billEl.innerHTML = BILL.map(b=>
+      `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid #0e1623">
+        <span style="color:#94a3b8">${b.icon} ${b.seg}</span>
+        <span style="color:${b.color};font-weight:700">${b.change}</span>
+      </div>`
+    ).join('');
+  }
+
+  // Main load curve
+  const ctx1 = document.getElementById('chart-tod-curve');
+  if (ctx1) {
+    if (charts.todCurve) charts.todCurve.destroy();
+    const tariffColors24 = sc.tariff.map(t => t>=8 ? 'rgba(239,68,68,0.18)' : t>=7 ? 'rgba(249,115,22,0.12)' : 'rgba(0,0,0,0)');
+    charts.todCurve = new Chart(ctx1, {
+      type: 'line',
+      data: {
+        labels: hl,
+        datasets: [
+          { label: 'Current Load (Flat Tariff)',
+            data: sc.baseline.map(v=>parseFloat(v.toFixed(1))),
+            borderColor:'#f97316', backgroundColor:'rgba(249,115,22,0.08)',
+            borderWidth:2.5, fill:true, tension:0.4, pointRadius:0, order:2 },
+          { label: 'With ToD Pricing',
+            data: sc.withTod.map(v=>parseFloat(v.toFixed(1))),
+            borderColor:'#3b82f6', backgroundColor:'rgba(59,130,246,0.12)',
+            borderWidth:2.5, fill:true, tension:0.4, pointRadius:0, order:1 },
+          { label: 'Tariff Zone',
+            data: sc.tariff.map((t,h)=> h>=17&&h<=21 ? Math.max(...sc.baseline)*1.05 : null),
+            backgroundColor:'rgba(239,68,68,0.08)', borderWidth:0,
+            fill:true, pointRadius:0, type:'bar', barPercentage:1, categoryPercentage:1, order:3 },
+        ],
+      },
+      options: {
+        responsive:true, maintainAspectRatio:false,
+        layout:{padding:{left:4,right:8,top:6,bottom:0}},
+        plugins:{
+          legend:{labels:{color:'#94a3b8',font:{size:10},boxWidth:12,filter:i=>i.datasetIndex<2}},
+          tooltip:{callbacks:{label:c=>c.datasetIndex<2?`${c.dataset.label}: ${c.raw} MW`:null}},
+        },
+        scales:{
+          x:{ticks:{color:'#8899aa',maxTicksLimit:12,font:{size:9}},grid:{color:'#1e2d42'}},
+          y:{ticks:{color:'#8899aa',callback:v=>`${v.toFixed(0)} MW`,font:{size:9}},grid:{color:'#1e2d42'}},
+        },
+      },
+    });
+  }
+
+  // Solar overlay
+  const ctx2 = document.getElementById('chart-tod-solar');
+  if (ctx2) {
+    if (charts.todSolar) charts.todSolar.destroy();
+    charts.todSolar = new Chart(ctx2, {
+      type: 'line',
+      data: {
+        labels: hl,
+        datasets: [
+          { label:'Demand (After ToD)', data:sc.withTod.map(v=>parseFloat(v.toFixed(1))),
+            borderColor:'#3b82f6', borderWidth:1.8, fill:false, tension:0.4, pointRadius:0 },
+          { label:'Solar Generation', data:sc.solar,
+            borderColor:'#fbbf24', backgroundColor:'rgba(251,191,36,0.18)',
+            borderWidth:2, fill:true, tension:0.5, pointRadius:0 },
+        ],
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        layout:{padding:{left:4,right:8,top:4,bottom:0}},
+        plugins:{legend:{labels:{color:'#94a3b8',font:{size:9},boxWidth:10}}},
+        scales:{
+          x:{ticks:{color:'#8899aa',maxTicksLimit:12,font:{size:8}},grid:{color:'#1e2d42'}},
+          y:{ticks:{color:'#8899aa',callback:v=>`${v.toFixed(0)}`,font:{size:8}},grid:{color:'#1e2d42'}},
+        },
+      },
+    });
+  }
+
+  // Segment stacked
+  const ctx3 = document.getElementById('chart-tod-segments');
+  if (ctx3) {
+    if (charts.todSegments) charts.todSegments.destroy();
+    charts.todSegments = new Chart(ctx3, {
+      type:'bar',
+      data:{
+        labels:hl,
+        datasets: Object.entries(sc.segments).map(([seg,data])=>({
+          label: seg.charAt(0).toUpperCase()+seg.slice(1),
+          data: data.map(v=>parseFloat(v.toFixed(1))),
+          backgroundColor: TOD_SEG_COLOR[seg],
+          borderWidth:0,
+          barPercentage:1, categoryPercentage:1,
+        })),
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        layout:{padding:{left:4,right:8,top:4,bottom:0}},
+        plugins:{
+          legend:{labels:{color:'#94a3b8',font:{size:9},boxWidth:10}},
+          tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.raw} MW`}},
+        },
+        scales:{
+          x:{stacked:true,ticks:{color:'#8899aa',maxTicksLimit:12,font:{size:8}},grid:{display:false}},
+          y:{stacked:true,ticks:{color:'#8899aa',callback:v=>`${v}MW`,font:{size:8}},grid:{color:'#1e2d42'}},
+        },
+      },
+    });
+  }
+
+  // Procurement cost comparison
+  const ctx4 = document.getElementById('chart-tod-procurement');
+  if (ctx4) {
+    if (charts.todProc) charts.todProc.destroy();
+    const peakHours = [17,18,19,20,21];
+    const PEAK_COST = 15;   // ₹L/MWh peak procurement
+    const OFF_COST  = 4.5;
+    const procBefore = peakHours.map(h => parseFloat((sc.baseline[h]*PEAK_COST/100).toFixed(1)));
+    const procAfter  = peakHours.map(h => parseFloat((sc.withTod[h]*PEAK_COST/100).toFixed(1)));
+    charts.todProc = new Chart(ctx4, {
+      type:'bar',
+      data:{
+        labels: peakHours.map(h=>`${h}:00`),
+        datasets:[
+          {label:'Before ToD', data:procBefore, backgroundColor:'rgba(239,68,68,0.75)', borderRadius:4},
+          {label:'After ToD',  data:procAfter,  backgroundColor:'rgba(16,185,129,0.75)', borderRadius:4},
+        ],
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        layout:{padding:{left:4,right:8,top:4,bottom:0}},
+        plugins:{
+          legend:{labels:{color:'#94a3b8',font:{size:9},boxWidth:10}},
+          tooltip:{callbacks:{label:c=>`₹${c.raw}L procurement cost`}},
+        },
+        scales:{
+          x:{ticks:{color:'#8899aa',font:{size:9}},grid:{display:false}},
+          y:{ticks:{color:'#8899aa',callback:v=>`₹${v}L`,font:{size:8}},grid:{color:'#1e2d42'}},
+        },
+      },
+    });
+  }
+
+  // Update map: zone stress reduction (greener = less stressed after ToD)
+  if (mlMap && STATE.localView === 'tod') {
+    const reductionPct = parseFloat(sc.peakRedPct);
+    const expr = ['match', ['get', 'zone_id']];
+    (STATE.data.zoneForecast || []).forEach((z,i) => {
+      const zRed = reductionPct * (0.8 + (i%5)*0.08);
+      const color = zRed > 12 ? '#10b981' : zRed > 8 ? '#22d3ee' : zRed > 5 ? '#f59e0b' : '#f97316';
+      expr.push(z.zone_id, color);
+    });
+    expr.push('#64748b');
+    try {
+      mlMap.setPaintProperty('zone-bounds-fill', 'fill-color', expr);
+      mlMap.setPaintProperty('zone-bounds-fill', 'fill-opacity', 0.40);
+    } catch(e) {}
+  }
+}
+
+function _bindToDSliders() {
+  [
+    ['tod-peak',  v => { STATE._todSettings.peakMultiplier = v/100; document.getElementById('tod-peak-val').textContent = `×${(v/100).toFixed(1)}`; }],
+    ['tod-solar', v => { STATE._todSettings.solarDiscount   = v/100; document.getElementById('tod-solar-val').textContent = `${v}%`; }],
+    ['tod-ev',    v => { STATE._todSettings.evAdoption      = v/100; document.getElementById('tod-ev-val').textContent = `${v}%`; }],
+    ['tod-resp',  v => { STATE._todSettings.responseStrength= v/100; document.getElementById('tod-resp-val').textContent = `${v}%`; }],
+    ['tod-sp',    v => { STATE._todSettings.solarPenetration= v/100; document.getElementById('tod-sp-val').textContent = `${v}%`; }],
+  ].forEach(([id, fn]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      fn(parseInt(el.value));
+      _renderTodTariffBands(STATE._todSettings);
+      _updateToDScenario();
+    });
+  });
+}
+
+// ── Smart Meter Deployment Optimizer — AI Investment Prioritization ──────────
+
+// Zone-specific synthetic factor data (deterministic, calibrated to real BESCOM geography)
+const DEPLOY_FACTORS = {
+  Z01:{ growth:0.70, outage:0.45, criticality:0.75, comm:0.85, density:0.82 }, // Indiranagar
+  Z02:{ growth:0.72, outage:0.42, criticality:0.65, comm:0.88, density:0.78 }, // Koramangala
+  Z03:{ growth:0.68, outage:0.40, criticality:0.60, comm:0.82, density:0.75 }, // HSR Layout
+  Z04:{ growth:0.55, outage:0.50, criticality:0.55, comm:0.80, density:0.85 }, // Jayanagar
+  Z05:{ growth:0.52, outage:0.55, criticality:0.50, comm:0.75, density:0.80 }, // Rajajinagar
+  Z06:{ growth:0.50, outage:0.58, criticality:0.55, comm:0.72, density:0.88 }, // Malleswaram
+  Z07:{ growth:0.88, outage:0.35, criticality:0.82, comm:0.90, density:0.60 }, // Whitefield
+  Z08:{ growth:0.85, outage:0.38, criticality:0.85, comm:0.88, density:0.55 }, // Electronic City
+  Z09:{ growth:0.75, outage:0.48, criticality:0.60, comm:0.80, density:0.65 }, // Marathahalli
+  Z10:{ growth:0.60, outage:0.72, criticality:0.45, comm:0.60, density:0.45 }, // Yelahanka
+  Z11:{ growth:0.65, outage:0.68, criticality:0.70, comm:0.65, density:0.50 }, // Hebbal
+  Z12:{ growth:0.45, outage:0.78, criticality:0.65, comm:0.70, density:0.55 }, // Peenya
+};
+
+const DEPLOY_W_DEFAULT = { atc:0.25, theft:0.20, revenue:0.20, outage:0.15, growth:0.10, density:0.05, criticality:0.05 };
+
+function computeDeployZones(weights) {
+  const zones   = STATE.data.zoneForecast || [];
+  const meters  = STATE.data.meters || [];
+  const w = weights || DEPLOY_W_DEFAULT;
+  const TARIFF = 7.5, METER_COST = 4500, AVG_KWH = 100;
+
+  // Normalisation helpers
+  const maxAtc    = Math.max(...zones.map(z => z.atc_pct));
+  const maxPeak   = Math.max(...zones.map(z => z.peak_mw));
+
+  return zones.map(z => {
+    const f = DEPLOY_FACTORS[z.zone_id] || { growth:0.55, outage:0.50, criticality:0.55, comm:0.75, density:0.65 };
+
+    // Factor scores (0–1)
+    const atcScore      = Math.min(1, Math.max(0, (z.atc_pct - 8) / (maxAtc - 8)));
+    const theftScore    = Math.min(1, (z.n_flagged / Math.max(z.n_meters, 1)) * 3.5);
+    const revenueScore  = atcScore * 0.65 + (z.peak_mw / maxPeak) * 0.35;
+    const outageScore   = f.outage;
+    const growthScore   = f.growth;
+    const densityScore  = f.density;
+    const critScore     = f.criticality;
+
+    const score = Math.min(1,
+      w.atc        * atcScore +
+      w.theft      * theftScore +
+      w.revenue    * revenueScore +
+      w.outage     * outageScore +
+      w.growth     * growthScore +
+      w.density    * densityScore +
+      w.criticality* critScore
+    );
+
+    // Ease = communication quality × inverse of density (less dense = easier)
+    const ease = Math.min(0.95, f.comm * 0.5 + (1 - f.density) * 0.35 + (z.type === 'rural_edge' ? 0.15 : z.type === 'semi_urban' ? 0.07 : 0));
+
+    // Financials (realistic per-consumer)
+    const consumers     = Math.round(z.n_meters * 18);
+    const nUnmetered    = Math.round(consumers * 0.93);
+    const lossPerCons   = (z.atc_pct / 100) * AVG_KWH * TARIFF;
+    const monthlyLoss   = lossPerCons * nUnmetered;
+    const payback       = (METER_COST * nUnmetered) / Math.max(monthlyLoss, 1);
+    const annualROI     = (monthlyLoss * 12) / 1e5;  // ₹L/yr
+
+    const priority = score >= 0.65 ? 'Critical' : score >= 0.48 ? 'High' : score >= 0.32 ? 'Medium' : 'Low';
+
+    return {
+      ...z, score, priority, ease,
+      atcScore, theftScore, revenueScore, outageScore, growthScore, densityScore, critScore,
+      consumers, nUnmetered, monthlyLoss, payback, annualROI, lossPerCons,
+    };
+  }).sort((a, b) => b.score - a.score);
+}
+
+function renderDeployView() {
+  if (!STATE.data.zoneForecast.length) return;
+  STATE._deployWeights = { ...DEPLOY_W_DEFAULT };
+  STATE._deployBudget  = 200;
+  _withShimmer('lview-deploy', _deployShimmerHtml(), _renderDeployFull, 350);
+}
+
+function _deployWhyReasons(z) {
+  const reasons = [];
+  if (z.atcScore > 0.65)      reasons.push(`High AT&C loss (${z.atc_pct.toFixed(1)}%) — significant unbilled energy`);
+  if (z.theftScore > 0.5)     reasons.push(`Elevated theft risk — ${z.n_flagged} meters flagged (${(z.theftScore*100).toFixed(0)}% rate)`);
+  if (z.growthScore > 0.75)   reasons.push(`High-growth zone (EV/solar corridor) — smart visibility critical early`);
+  if (z.outageScore > 0.60)   reasons.push(`Frequent outages — real-time monitoring cuts restoration time`);
+  if (z.critScore > 0.70)     reasons.push(`Critical infrastructure zone (hospitals / IT parks / metro)`);
+  if (z.payback < 36)         reasons.push(`Fast payback: ${z.payback.toFixed(0)} months at RDSS ₹4,500/meter`);
+  if (z.densityScore > 0.75)  reasons.push(`High consumer density — maximum meters per deployment team`);
+  if (!reasons.length)        reasons.push(`Moderate across all factors — suitable for secondary rollout`);
+  return reasons;
+}
+
+function _renderDeployFull() {
+  const w  = STATE._deployWeights;
+  const budget = STATE._deployBudget;
+  const zoneData = computeDeployZones(w);
+  const top = zoneData[0];
+  const METER_COST_CR = 4500 * 18 * 48 / 1e7; // ₹Cr per zone
+  const zonesAffordable = Math.min(12, Math.floor(budget / METER_COST_CR));
+  const totalAnnual = zoneData.reduce((s, z) => s + z.annualROI, 0);
+  const avgScore = (zoneData.reduce((s, z) => s + z.score, 0) / zoneData.length * 100).toFixed(0);
+
+  const PC_SOLID = { Critical:'#ef4444', High:'#f97316', Medium:'#f59e0b', Low:'#10b981' };
+  const PC_ALPHA = { Critical:'rgba(239,68,68,0.82)', High:'rgba(249,115,22,0.82)', Medium:'rgba(245,158,11,0.78)', Low:'rgba(16,185,129,0.72)' };
+
+  const panel = document.getElementById('lview-deploy');
+  if (!panel) return;
+  panel.innerHTML = `
+    <section class="kpi-strip local-kpi-strip">
+      <div class="kpi-card kpi-red">
+        <div class="kpi-label">Top Priority Zone</div>
+        <div class="kpi-value" style="font-size:16pt">${top.zone_name}</div>
+        <div class="kpi-sub">Score ${(top.score*100).toFixed(0)}/100 · Deploy immediately</div>
+      </div>
+      <div class="kpi-card kpi-amber">
+        <div class="kpi-label">Zones in Budget</div>
+        <div class="kpi-value">${zonesAffordable} <span style="font-size:12pt">/ 12</span></div>
+        <div class="kpi-sub">₹${budget} Cr budget · ₹${METER_COST_CR.toFixed(1)} Cr/zone</div>
+      </div>
+      <div class="kpi-card kpi-green">
+        <div class="kpi-label">Total Annual Recovery</div>
+        <div class="kpi-value">₹${(totalAnnual/100).toFixed(1)} Cr</div>
+        <div class="kpi-sub">all 12 zones · 100 kWh/consumer</div>
+      </div>
+      <div class="kpi-card kpi-blue">
+        <div class="kpi-label">Avg Priority Score</div>
+        <div class="kpi-value">${avgScore}<span style="font-size:12pt">/100</span></div>
+        <div class="kpi-sub">composite of 7 factors</div>
+      </div>
+    </section>
+
+    <!-- Scenario controls -->
+    <section class="panel panel-full" style="padding:12px 16px">
+      <div class="panel-header" style="margin-bottom:10px">
+        <span class="panel-title"><i data-lucide="sliders-horizontal"></i> Investment Scenario Controls</span>
+        <span class="panel-sub">adjust focus — rankings update live</span>
+      </div>
+      <div class="deploy-scenario-grid" id="deploy-scenario-grid">
+        <div class="deploy-sc-item">
+          <label class="deploy-sc-label"><i data-lucide="indian-rupee"></i> Budget (₹ Cr) <span class="deploy-sc-val" id="dsc-budget-val">₹${budget} Cr</span></label>
+          <input type="range" class="deploy-sc-range" id="dsc-budget" min="50" max="500" step="50" value="${budget}">
+          <div class="deploy-sc-ticks"><span>₹50Cr</span><span>₹200Cr</span><span>₹500Cr</span></div>
+        </div>
+        <div class="deploy-sc-item">
+          <label class="deploy-sc-label"><i data-lucide="zap"></i> AT&C Focus <span class="deploy-sc-val" id="dsc-atc-val">${Math.round(w.atc*100)}%</span></label>
+          <input type="range" class="deploy-sc-range" id="dsc-atc" min="0" max="50" step="5" value="${Math.round(w.atc*100)}">
+        </div>
+        <div class="deploy-sc-item">
+          <label class="deploy-sc-label"><i data-lucide="siren"></i> Theft Priority <span class="deploy-sc-val" id="dsc-theft-val">${Math.round(w.theft*100)}%</span></label>
+          <input type="range" class="deploy-sc-range" id="dsc-theft" min="0" max="50" step="5" value="${Math.round(w.theft*100)}">
+        </div>
+        <div class="deploy-sc-item">
+          <label class="deploy-sc-label"><i data-lucide="car"></i> EV/Future Growth <span class="deploy-sc-val" id="dsc-growth-val">${Math.round(w.growth*100)}%</span></label>
+          <input type="range" class="deploy-sc-range" id="dsc-growth" min="0" max="40" step="5" value="${Math.round(w.growth*100)}">
+        </div>
+        <div class="deploy-sc-item">
+          <label class="deploy-sc-label"><i data-lucide="activity"></i> Outage Reliability <span class="deploy-sc-val" id="dsc-outage-val">${Math.round(w.outage*100)}%</span></label>
+          <input type="range" class="deploy-sc-range" id="dsc-outage" min="0" max="40" step="5" value="${Math.round(w.outage*100)}">
+        </div>
+      </div>
+    </section>
+
+    <!-- Matrix + Table -->
+    <section class="panel-row">
+      <div class="panel" style="flex:1.1">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="target"></i> Priority Matrix — Impact vs Ease</span>
+          <span class="panel-sub">4-quadrant · bubble = composite priority score · click zone for reasoning</span>
+        </div>
+        <div class="chart-wrap" style="height:310px;position:relative">
+          <canvas id="chart-deploy-matrix"></canvas>
+          <div style="position:absolute;top:14px;left:52%;font-size:8pt;color:#475569;pointer-events:none">Strategic Investment →</div>
+          <div style="position:absolute;top:14px;left:8px;font-size:8pt;color:#ef444480;pointer-events:none">Quick Wins →</div>
+        </div>
+      </div>
+      <div class="panel" style="flex:1">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="list-ordered"></i> Priority Ranking</span>
+          <span class="panel-sub">click row to see AI reasoning</span>
+        </div>
+        <div id="deploy-table" style="overflow-y:auto;max-height:240px"></div>
+        <div id="deploy-why" class="deploy-why-panel" style="display:none"></div>
+      </div>
+    </section>
+
+    <!-- Factor breakdown -->
+    <section class="panel-row">
+      <div class="panel" style="flex:1">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="radar"></i> Factor Breakdown — <span id="deploy-radar-title">${top.zone_name}</span></span>
+          <span class="panel-sub">7-factor composite score · click any zone row to compare</span>
+        </div>
+        <div class="chart-wrap" style="height:200px"><canvas id="chart-deploy-radar"></canvas></div>
+      </div>
+      <div class="panel" style="flex:1">
+        <div class="panel-header">
+          <span class="panel-title"><i data-lucide="clock"></i> Payback Period by Zone</span>
+          <span class="panel-sub">shortest = highest ROI · threshold: 36 months</span>
+        </div>
+        <div class="chart-wrap" style="height:200px"><canvas id="chart-deploy-payback"></canvas></div>
+      </div>
+    </section>`;
+
+  refreshIcons();
+  _renderDeployCharts(zoneData, PC_SOLID, PC_ALPHA, top.zone_id);
+  _renderDeployTable(zoneData, PC_SOLID, null);
+  _updateDeployMap(zoneData, PC_SOLID);
+
+  // Bind scenario sliders
+  ['dsc-atc','dsc-theft','dsc-growth','dsc-outage','dsc-budget'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const v = parseInt(el.value);
+      const valEl = document.getElementById(`${id}-val`);
+      if (id === 'dsc-budget') {
+        STATE._deployBudget = v;
+        if (valEl) valEl.textContent = `₹${v} Cr`;
+      } else {
+        const key = id.replace('dsc-','');
+        STATE._deployWeights[key] = v / 100;
+        if (valEl) valEl.textContent = `${v}%`;
+      }
+      const newZones = computeDeployZones(STATE._deployWeights);
+      _renderDeployCharts(newZones, PC_SOLID, PC_ALPHA, newZones[0].zone_id);
+      _renderDeployTable(newZones, PC_SOLID, null);
+      _updateDeployMap(newZones, PC_SOLID);
+      const kAfford = Math.min(12, Math.floor(STATE._deployBudget / METER_COST_CR));
+      const topEl = document.querySelector('#lview-deploy .kpi-card:nth-child(2) .kpi-value');
+      if (topEl) topEl.innerHTML = `${kAfford} <span style="font-size:12pt">/ 12</span>`;
+    });
+  });
+}
+
+function _renderDeployCharts(zoneData, PC_SOLID, PC_ALPHA, selectedZoneId) {
+  // 4-quadrant bubble matrix
+  const ctx1 = document.getElementById('chart-deploy-matrix');
+  if (ctx1) {
+    if (charts.deployMatrix) charts.deployMatrix.destroy();
+    const QUAD_COLORS = { Critical: PC_ALPHA.Critical, High: PC_ALPHA.High, Medium: PC_ALPHA.Medium, Low: PC_ALPHA.Low };
+    charts.deployMatrix = new Chart(ctx1, {
+      type: 'bubble',
+      data: {
+        datasets: [{
+          label: 'Zones',
+          data: zoneData.map(z => ({
+            x: parseFloat(z.ease.toFixed(3)),
+            y: parseFloat(z.score.toFixed(3)),
+            r: Math.max(9, Math.min(24, z.score * 28)),
+            zone: z.zone_name, zoneId: z.zone_id,
+            priority: z.priority, score: z.score,
+            atc: z.atc_pct, payback: z.payback,
+          })),
+          backgroundColor: zoneData.map(z => z.zone_id === selectedZoneId ? 'rgba(99,102,241,0.92)' : QUAD_COLORS[z.priority]),
+          borderColor: zoneData.map(z => z.zone_id === selectedZoneId ? '#818cf8' : PC_SOLID[z.priority]),
+          borderWidth: zoneData.map(z => z.zone_id === selectedZoneId ? 2.5 : 1.5),
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        layout: { padding: { left: 8, right: 12, top: 8, bottom: 8 } },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: c => [`${c.raw.zone} · Score ${(c.raw.score*100).toFixed(0)}/100`, `AT&C: ${c.raw.atc.toFixed(1)}% · Payback: ${c.raw.payback.toFixed(0)} mo`, `Priority: ${c.raw.priority}`] } },
+          annotation: {},
+        },
+        onClick: (e, els) => {
+          if (!els.length) return;
+          const z = zoneData[els[0].index];
+          _renderDeployTable(zoneData, PC_SOLID, z.zone_id);
+          _renderDeployRadar(z);
+          const titleEl = document.getElementById('deploy-radar-title');
+          if (titleEl) titleEl.textContent = z.zone_name;
+        },
+        scales: {
+          x: { min: 0, max: 1.05, title: { display: true, text: 'Ease of Deployment →', color: '#64748b', font: { size: 10 } }, ticks: { color: '#8899aa', font: { size: 9 } }, grid: { color: '#1e2d42' },
+            afterDraw: (axis) => {
+              const { ctx, chartArea } = axis.chart;
+              const midX = axis.getPixelForValue(0.5);
+              ctx.save(); ctx.strokeStyle = 'rgba(100,116,139,0.3)'; ctx.setLineDash([4,4]);
+              ctx.beginPath(); ctx.moveTo(midX, chartArea.top); ctx.lineTo(midX, chartArea.bottom); ctx.stroke();
+              ctx.restore();
+            }
+          },
+          y: { min: 0, max: 1.05, title: { display: true, text: 'Impact Score →', color: '#64748b', font: { size: 10 } }, ticks: { color: '#8899aa', callback: v => `${(v*100).toFixed(0)}`, font: { size: 9 } }, grid: { color: '#1e2d42' },
+            afterDraw: (axis) => {
+              const { ctx, chartArea } = axis.chart;
+              const midY = axis.getPixelForValue(0.5);
+              ctx.save(); ctx.strokeStyle = 'rgba(100,116,139,0.3)'; ctx.setLineDash([4,4]);
+              ctx.beginPath(); ctx.moveTo(chartArea.left, midY); ctx.lineTo(chartArea.right, midY); ctx.stroke();
+              ctx.restore();
+            }
+          },
+        },
+      },
+    });
+  }
+
+  // Radar chart for selected zone
+  const selZone = zoneData.find(z => z.zone_id === selectedZoneId) || zoneData[0];
+  _renderDeployRadar(selZone);
+
+  // Payback bar (horizontal)
+  const sorted = [...zoneData].sort((a, b) => a.payback - b.payback);
+  const ctx3 = document.getElementById('chart-deploy-payback');
+  if (ctx3) {
+    if (charts.deployPayback) charts.deployPayback.destroy();
+    charts.deployPayback = new Chart(ctx3, {
+      type: 'bar',
+      data: {
+        labels: sorted.map(z => z.zone_name),
+        datasets: [
+          { label: 'Payback', data: sorted.map(z => parseFloat(z.payback.toFixed(1))),
+            backgroundColor: sorted.map(z => z.payback <= 36 ? PC_ALPHA[z.priority] : 'rgba(100,116,139,0.45)'),
+            borderColor: sorted.map(z => z.payback <= 36 ? PC_SOLID[z.priority] : '#64748b'),
+            borderWidth: 1, borderRadius: 3, barPercentage: 0.65 },
+          { label: '36-month threshold', data: sorted.map(() => 36),
+            type: 'line', borderColor: '#f97316', borderDash: [5,3], borderWidth: 1.5,
+            pointRadius: 0, fill: false },
+        ],
+      },
+      options: {
+        indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+        layout: { padding: { left: 4, right: 8, top: 4, bottom: 0 } },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: c => c.datasetIndex === 0 ? `${c.raw} months payback` : '36-month break-even' } },
+        },
+        scales: {
+          x: { ticks: { color: '#8899aa', font: { size: 9 } }, grid: { color: '#1e2d42' } },
+          y: { ticks: { color: '#cbd5e1', font: { size: 9 } }, grid: { display: false } },
+        },
+      },
+    });
+  }
+}
+
+function _renderDeployRadar(z) {
+  const ctx = document.getElementById('chart-deploy-radar');
+  if (!ctx) return;
+  if (charts.deployRadar) charts.deployRadar.destroy();
+  charts.deployRadar = new Chart(ctx, {
+    type: 'radar',
+    data: {
+      labels: ['AT&C Loss', 'Theft Risk', 'Revenue', 'Outage Freq', 'Future Growth', 'Density', 'Criticality'],
+      datasets: [{
+        label: z.zone_name,
+        data: [
+          parseFloat((z.atcScore * 100).toFixed(1)),
+          parseFloat((z.theftScore * 100).toFixed(1)),
+          parseFloat((z.revenueScore * 100).toFixed(1)),
+          parseFloat((z.outageScore * 100).toFixed(1)),
+          parseFloat((z.growthScore * 100).toFixed(1)),
+          parseFloat((z.densityScore * 100).toFixed(1)),
+          parseFloat((z.critScore * 100).toFixed(1)),
+        ],
+        borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.18)',
+        borderWidth: 2, pointBackgroundColor: '#3b82f6', pointRadius: 3,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      layout: { padding: { top: 4, bottom: 4 } },
+      plugins: { legend: { display: false } },
+      scales: {
+        r: {
+          min: 0, max: 100,
+          ticks: { display: false },
+          pointLabels: { color: '#94a3b8', font: { size: 9 } },
+          grid: { color: '#1e2d42' },
+          angleLines: { color: '#1e2d42' },
+        },
+      },
+    },
+  });
+}
+
+function _renderDeployTable(zoneData, PC_SOLID, highlightId) {
+  const tbody = document.getElementById('deploy-table');
+  if (!tbody) return;
+  tbody.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:8.5pt">
+    <thead><tr style="color:#64748b;border-bottom:1px solid #1e2d42;font-size:7.5pt;text-transform:uppercase;letter-spacing:0.5px">
+      <th style="padding:4px 8px">#</th>
+      <th style="padding:4px 8px;text-align:left">Zone</th>
+      <th style="padding:4px 8px;text-align:right">Score</th>
+      <th style="padding:4px 8px;text-align:right">AT&C</th>
+      <th style="padding:4px 8px;text-align:right">Payback</th>
+      <th style="padding:4px 8px;text-align:center">Tier</th>
+    </tr></thead><tbody>
+    ${zoneData.map((z, i) => {
+      const hl = z.zone_id === highlightId ? 'background:rgba(59,130,246,0.10);' : '';
+      return `<tr class="deploy-row" data-zone-id="${z.zone_id}" style="border-bottom:1px solid #0a1220;cursor:pointer;${hl}">
+        <td style="padding:5px 8px;color:#64748b">${i+1}</td>
+        <td style="padding:5px 8px;font-weight:600;color:#e2e8f0">${z.zone_name}</td>
+        <td style="padding:5px 8px;text-align:right">
+          <div style="display:flex;align-items:center;gap:5px;justify-content:flex-end">
+            <div style="width:40px;height:4px;background:#1e2d42;border-radius:2px">
+              <div style="width:${Math.round(z.score*100)}%;height:4px;background:${PC_SOLID[z.priority]};border-radius:2px"></div>
+            </div>
+            <span style="color:${PC_SOLID[z.priority]};font-weight:700">${(z.score*100).toFixed(0)}</span>
+          </div>
+        </td>
+        <td style="padding:5px 8px;text-align:right;color:#ef4444">${z.atc_pct.toFixed(1)}%</td>
+        <td style="padding:5px 8px;text-align:right;color:#94a3b8">${z.payback.toFixed(0)} mo</td>
+        <td style="padding:5px 8px;text-align:center"><span style="background:${PC_SOLID[z.priority]}22;color:${PC_SOLID[z.priority]};border:1px solid ${PC_SOLID[z.priority]}55;padding:1px 7px;border-radius:999px;font-size:7.5pt;font-weight:700">${z.priority}</span></td>
+      </tr>`;
+    }).join('')}
+    </tbody></table>`;
+
+  // Bind row clicks
+  tbody.querySelectorAll('.deploy-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const z = zoneData.find(zz => zz.zone_id === row.dataset.zoneId);
+      if (!z) return;
+      const PC_SOLID2 = { Critical:'#ef4444', High:'#f97316', Medium:'#f59e0b', Low:'#10b981' };
+      _renderDeployTable(zoneData, PC_SOLID2, z.zone_id);
+      _renderDeployRadar(z);
+      const titleEl = document.getElementById('deploy-radar-title');
+      if (titleEl) titleEl.textContent = z.zone_name;
+      // Show "Why Recommended?" panel
+      const whyEl = document.getElementById('deploy-why');
+      if (whyEl) {
+        const reasons = _deployWhyReasons(z);
+        whyEl.style.display = 'block';
+        whyEl.innerHTML = `<div class="deploy-why-title"><i data-lucide="brain-circuit"></i> Why <b>${z.zone_name}</b> is recommended</div>
+          <ul class="deploy-why-list">${reasons.map(r => `<li>${r}</li>`).join('')}</ul>
+          <div class="deploy-why-footer">Annual Recovery Potential: <b>₹${z.annualROI.toFixed(1)}L</b> · Score: <b>${(z.score*100).toFixed(0)}/100</b></div>`;
+        refreshIcons();
+      }
+    });
+  });
+}
+
+function _updateDeployMap(zoneData, PC_SOLID) {
+  if (!mlMap) return;
+
+  // Inject priority + score_label into the zone-bounds GeoJSON source
+  // so MapLibre label/line expressions can reference them directly
+  const fc = STATE.data.zoneBounds;
+  if (fc && fc.features && mlMap.getSource('zone-bounds')) {
+    const byId = Object.fromEntries(zoneData.map(z => [z.zone_id, z]));
+    const enriched = {
+      type: 'FeatureCollection',
+      features: fc.features.map(f => {
+        const z = byId[f.properties.zone_id];
+        return {
+          ...f,
+          properties: {
+            ...f.properties,
+            zone_name:     f.properties.zone_name || f.properties.zone_id,
+            priority:      z ? z.priority : 'Low',
+            score_label:   z ? `${(z.score * 100).toFixed(0)}/100` : '–',
+            priority_color: z ? PC_SOLID[z.priority] : '#64748b',
+          },
+        };
+      }),
+    };
+    try { mlMap.getSource('zone-bounds').setData(enriched); } catch(e) {}
+  }
+
+  // Fill — priority color at high opacity
+  const fillExpr = ['match', ['get', 'zone_id']];
+  zoneData.forEach(z => { fillExpr.push(z.zone_id, PC_SOLID[z.priority]); });
+  fillExpr.push('#64748b');
+
+  // Line — solid, thick, same priority color
+  const lineExpr = ['match', ['get', 'zone_id']];
+  zoneData.forEach(z => { lineExpr.push(z.zone_id, PC_SOLID[z.priority]); });
+  lineExpr.push('#64748b');
+
+  try {
+    mlMap.setPaintProperty('zone-bounds-fill', 'fill-color', fillExpr);
+    mlMap.setPaintProperty('zone-bounds-fill', 'fill-opacity', 0.38);
+
+    mlMap.setPaintProperty('zone-bounds-line', 'line-color', lineExpr);
+    mlMap.setPaintProperty('zone-bounds-line', 'line-width', 2.8);
+    mlMap.setPaintProperty('zone-bounds-line', 'line-opacity', 1);
+    mlMap.setLayoutProperty('zone-bounds-line', 'line-cap', 'round');
+    try { mlMap.setPaintProperty('zone-bounds-line', 'line-dasharray', null); } catch(_) {}
+
+    // Label: zone name + score on second line
+    mlMap.setLayoutProperty('zone-bounds-label', 'text-field',
+      ['concat', ['get', 'zone_name'], '\n', ['get', 'score_label']]);
+    mlMap.setLayoutProperty('zone-bounds-label', 'text-size', 10);
+    mlMap.setPaintProperty('zone-bounds-label', 'text-color', '#ffffff');
+    mlMap.setPaintProperty('zone-bounds-label', 'text-halo-color', '#0a1220');
+    mlMap.setPaintProperty('zone-bounds-label', 'text-halo-width', 1.8);
+    mlMap.setPaintProperty('zone-bounds-label', 'text-opacity', 1);
+  } catch(e) {}
+}
 
 // ═══════════════════════════════════════════════════ DISCOM DETAIL DRAWER
 (function initDrawer() {

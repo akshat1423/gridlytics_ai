@@ -20,6 +20,8 @@
 
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <!-- Sankey plugin for Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-sankey@0.12.0/dist/chartjs-chart-sankey.min.js"></script>
 
   <!-- Lucide icons (open-source SVG icon library) -->
   <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
@@ -50,7 +52,9 @@
       <button class="toggle-btn active" data-local-view="meters"><i data-lucide="siren"></i> Meter Anomalies</button>
       <button class="toggle-btn" data-local-view="zones"><i data-lucide="bar-chart-3"></i> Zone Forecast</button>
       <button class="toggle-btn" data-local-view="inspector"><i data-lucide="clipboard-list"></i> Inspector Queue</button>
-      <button class="toggle-btn" data-local-view="whatif"><i data-lucide="sparkles"></i> What-If</button>
+      <button class="toggle-btn" data-local-view="whatif"><i data-lucide="box"></i> Digital Twin</button>
+      <button class="toggle-btn" data-local-view="tod"><i data-lucide="clock"></i> ToD Pricing</button>
+      <button class="toggle-btn" data-local-view="deploy"><i data-lucide="map-pin-plus"></i> Deploy Optimizer</button>
     </div>
   </div>
 
@@ -357,6 +361,24 @@
         </div>
         <div id="zone-table" class="discom-table"></div>
       </section>
+
+      <section class="panel-row">
+        <div class="panel" style="flex:1.1">
+          <div class="panel-header">
+            <span class="panel-title"><i data-lucide="workflow"></i> Energy Revenue Flow — Sankey</span>
+            <span class="panel-sub">Generated → Losses → Billed → Collected · BESCOM 12-zone aggregate</span>
+          </div>
+          <div class="chart-wrap" style="height:220px"><canvas id="chart-sankey"></canvas></div>
+        </div>
+        <div class="panel" style="flex:0.9">
+          <div class="panel-header">
+            <span class="panel-title"><i data-lucide="indian-rupee"></i> Revenue Recovery Potential</span>
+            <span class="panel-sub">monthly · across flagged meters</span>
+          </div>
+          <div class="kpi-strip" style="grid-template-columns:1fr 1fr;gap:8px;padding:10px 0 6px" id="rev-kpi-strip"></div>
+          <div class="chart-wrap" style="height:120px"><canvas id="chart-rev-recovery"></canvas></div>
+        </div>
+      </section>
     </div><!-- /lview-zones -->
 
     <!-- ═══════════════════ LOCAL VIEW: METER ANOMALIES (full-bleed map mode) ═══════════════════ -->
@@ -374,110 +396,19 @@
       </section>
     </div><!-- /lview-inspector -->
 
-    <!-- ═══════════════════ LOCAL VIEW: WHAT-IF COUNTERFACTUAL ═══════════════════ -->
-    <div id="lview-whatif" class="view-dashboard" style="display:none">
+    <!-- ═══════════════════ LOCAL VIEW: DIGITAL TWIN SIMULATOR ═══════════════════ -->
+    <!-- Content fully rendered by _renderDigitalTwinFull() in app.js -->
+    <div id="lview-whatif" class="view-dashboard" style="display:none"></div>
 
-      <!-- Scenario summary KPI strip — updates live as sliders move -->
-      <section class="kpi-strip whatif-summary">
-        <div class="kpi-card kpi-amber">
-          <div class="kpi-label">SYSTEM STRESS</div>
-          <div class="kpi-value" id="wif-stress">–</div>
-          <div class="kpi-sub" id="wif-stress-sub">scenario-aggregate</div>
-        </div>
-        <div class="kpi-card kpi-red">
-          <div class="kpi-label">PEAK LOAD</div>
-          <div class="kpi-value" id="wif-peak">–</div>
-          <div class="kpi-sub" id="wif-peak-zone">vs baseline</div>
-        </div>
-        <div class="kpi-card kpi-blue">
-          <div class="kpi-label">EXTRA FLAGGED</div>
-          <div class="kpi-value" id="wif-flagged">–</div>
-          <div class="kpi-sub">heat-stress signatures</div>
-        </div>
-        <div class="kpi-card kpi-green">
-          <div class="kpi-label">ZONES @ RISK</div>
-          <div class="kpi-value" id="wif-risk-zones">–</div>
-          <div class="kpi-sub">Critical or High</div>
-        </div>
-      </section>
+    <!-- ═══════════════════ LOCAL VIEW: ToD PRICING INTELLIGENCE ═══════════════════ -->
+    <div id="lview-tod" class="view-dashboard" style="display:none">
+      <!-- Populated dynamically by renderToDView() -->
+    </div><!-- /lview-tod -->
 
-      <!-- Scenario controls -->
-      <section class="panel panel-full whatif-control-panel">
-        <div class="panel-header">
-          <span class="panel-title"><i data-lucide="sliders-horizontal"></i> Scenario Controls</span>
-          <span class="panel-sub">pre-computed scenario grid · instant interpolation · counterfactual demand &amp; theft projection</span>
-        </div>
-        <div class="whatif-controls">
-          <div class="whatif-slider">
-            <div class="whatif-slider-head">
-              <span class="whatif-slider-label"><i data-lucide="thermometer-sun"></i> Heatwave</span>
-              <span class="whatif-slider-val" id="whatif-heat-val">+0°C</span>
-            </div>
-            <input type="range" id="whatif-heat" min="0" max="8" step="2" value="0">
-            <div class="whatif-slider-ticks"><span>0</span><span>+2</span><span>+4</span><span>+6</span><span>+8</span></div>
-          </div>
-          <div class="whatif-slider">
-            <div class="whatif-slider-head">
-              <span class="whatif-slider-label"><i data-lucide="air-vent"></i> AC penetration delta</span>
-              <span class="whatif-slider-val" id="whatif-ac-val">0%</span>
-            </div>
-            <input type="range" id="whatif-ac" min="-20" max="30" step="10" value="0">
-            <div class="whatif-slider-ticks"><span>−20%</span><span>−10%</span><span>0</span><span>+10%</span><span>+20%</span><span>+30%</span></div>
-          </div>
-          <div class="whatif-extras">
-            <label class="whatif-toggle"><input type="checkbox" id="whatif-festival"><span class="whatif-toggle-pill"></span><i data-lucide="party-popper"></i> Festival / weekend</label>
-            <button class="whatif-reset-btn" id="whatif-reset"><i data-lucide="rotate-ccw"></i> Reset</button>
-          </div>
-        </div>
-      </section>
-
-      <!-- Comparison row -->
-      <section class="panel-row">
-        <div class="panel">
-          <div class="panel-header">
-            <span class="panel-title"><i data-lucide="zap"></i> Baseline vs Scenario · Zone Peak Load</span>
-            <span class="panel-sub">grouped bars · MW · color = new risk tier</span>
-          </div>
-          <div class="chart-wrap" style="height:300px"><canvas id="chart-whatif-peak"></canvas></div>
-        </div>
-        <div class="panel">
-          <div class="panel-header">
-            <span class="panel-title"><i data-lucide="siren"></i> Projected Extra Flagged Meters</span>
-            <span class="panel-sub">heat-stress driven theft + AC-tariff mismatches</span>
-          </div>
-          <div class="chart-wrap" style="height:300px"><canvas id="chart-whatif-flagged"></canvas></div>
-        </div>
-      </section>
-
-      <!-- Risk-level redistribution -->
-      <section class="panel-row">
-        <div class="panel">
-          <div class="panel-header">
-            <span class="panel-title"><i data-lucide="bar-chart-3"></i> Risk Level Distribution Shift</span>
-            <span class="panel-sub">how many zones move into each tier</span>
-          </div>
-          <div class="chart-wrap" style="height:240px"><canvas id="chart-whatif-risk"></canvas></div>
-        </div>
-        <div class="panel">
-          <div class="panel-header">
-            <span class="panel-title"><i data-lucide="list-ordered"></i> Zone Status Change</span>
-            <span class="panel-sub">sorted by Δ peak MW · biggest movers first</span>
-          </div>
-          <div id="whatif-zone-table" class="discom-table" style="max-height:240px;overflow-y:auto"></div>
-        </div>
-      </section>
-
-      <!-- AI narrative -->
-      <section class="panel panel-full" style="background:linear-gradient(135deg,#1e1b4b 0%,#0e1623 100%);border-color:#4f46e5">
-        <div class="panel-header">
-          <span class="panel-title"><i data-lucide="bot"></i> AI Narrative</span>
-          <span class="panel-sub">generated by local Llama 3.1 · offline</span>
-        </div>
-        <div class="whatif-narrative" id="whatif-narrative">
-          Loading scenario…
-        </div>
-      </section>
-    </div><!-- /lview-whatif -->
+    <!-- ═══════════════════ LOCAL VIEW: DEPLOYMENT OPTIMIZER ═══════════════════ -->
+    <div id="lview-deploy" class="view-dashboard" style="display:none">
+      <!-- Populated dynamically by renderDeployView() -->
+    </div><!-- /lview-deploy -->
 
   </main><!-- /mode-local -->
 
